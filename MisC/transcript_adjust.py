@@ -1,4 +1,5 @@
 import pandas as pd
+import scanpy as sc
 from scipy.spatial.distance import cdist
 from copy import deepcopy
 from utility import calculate_mask_distance, annotate_tx_mask_distance, remove_tx
@@ -45,6 +46,17 @@ def propose_adjustment(adata,
     sc.pp.log1p(proposed_adata)
     # np.nan_to_num(proposed_adata.X, nan=0, copy=False)
     proposed_adata.raw = proposed_adata.copy()
+
+    return 0
+
+
+def test_proposed_adjustment():
+    pass 
+
+
+def adjust_counts():
+    pass 
+
 
 
 
