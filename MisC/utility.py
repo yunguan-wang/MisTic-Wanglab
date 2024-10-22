@@ -39,7 +39,7 @@ def import_data(cell_by_gene_counts: Union[str, pd.DataFrame],
     detected_transcripts : Union[str, pd.DataFrame]
         Either the path to the csv file or a pandas dataframe containing the information of the detected transcripts.
         The first column is assumed to be some index. The information should contain the ID for a transcripte/molecule, 
-        the ID of the cell it belongs to, its xy coordinate named x, y respectively, and its gene information. 
+        the ID of the cell it belongs to, its xy coordinate named global_x, global_y respectively, and its gene information. 
 
     Returns
     -------
@@ -172,16 +172,14 @@ def calculate_mask_distance(adata: sc.AnnData,
     return mask_distance
 
 
-def annotate_tx_mask_distance(
-        df, # df is return from calculate_mask_distance
+def annotate_tx_mask_distance(df, # df is return from calculate_mask_distance
         tx_metadata,
         cell_coords,
         x_col = 'global_x',
         y_col = 'global_y',
         cell_col = 'cell_id',
         gene_col = 'gene',
-        tx_col = 'molecule_id',
-        ):
+        tx_col = 'molecule_id'):
     df = df.copy()
     intf_tx = tx_metadata[
         tx_metadata.cell_id.isin(df.index)][[x_col,y_col,cell_col,gene_col,tx_col]]
@@ -197,20 +195,6 @@ def annotate_tx_mask_distance(
     intf_tx['neaby_celltype'] = cell_coords.loc[intf_tx.neaghbor_by_centroid,'leiden'].values
     return intf_tx
 
-
-def random_downsample(counts: pd.DataFrame, cells: list , n_remove:int = 5):
-    cell_counts = counts.loc[cells,:].copy()
-    cell_counts.index = cell_counts.index.astype(str)
-    n_remove = np.minimum((cell_counts.sum(axis=1)/10).values, n_remove).astype(int)
-    for c, n in zip(cells, n_remove):
-        genes = cell_counts.columns[cell_counts.loc[c,:]>0]
-        while True:
-            remove = np.random.choice(genes, n)
-            remove, remove_counts = np.unique(remove, return_counts=True)
-            if (cell_counts.loc[c, remove] >= remove_counts).all():
-                break
-        cell_counts.loc[c, remove] -= remove_counts
-    return cell_counts
 
 def mix_norm_cdf(x, model):
     weights, means, covars = model.weights_, model.means_.reshape(-1), model.covariances_.reshape(-1)
@@ -289,7 +273,19 @@ def remove_tx(
 
 
 
-
+def random_downsample(counts: pd.DataFrame, cells: list , n_remove:int = 5):
+    cell_counts = counts.loc[cells,:].copy()
+    cell_counts.index = cell_counts.index.astype(str)
+    n_remove = np.minimum((cell_counts.sum(axis=1)/10).values, n_remove).astype(int)
+    for c, n in zip(cells, n_remove):
+        genes = cell_counts.columns[cell_counts.loc[c,:]>0]
+        while True:
+            remove = np.random.choice(genes, n)
+            remove, remove_counts = np.unique(remove, return_counts=True)
+            if (cell_counts.loc[c, remove] >= remove_counts).all():
+                break
+        cell_counts.loc[c, remove] -= remove_counts
+    return cell_counts
 
 
     
