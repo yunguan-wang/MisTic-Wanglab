@@ -99,61 +99,77 @@ def import_data(cell_by_gene_counts: Union[str, pd.DataFrame],
     
 
 
-def calculate_mask_distance(
-    centroid_dist: pd.DataFrame,
-    cell_coords: pd.DataFrame,
-    max_centroid_dist: int = 15,
-    min_centroid_dist: int = 0,
-    cluster_col:str = 'leiden',
-    x_col:str = 'x',
-    y_col:str = 'y',
-    geometry_col:str = 'Geometry',
-    re_cal_centroid_dist:bool = False
-    ):
-    '''
-    centroid_dist: cell by cell distance matrix by centroid location, 
-    max_centroid_dist: maximal distance to consider neighbors, 
-    max_centroid_dist: minimal distance to consider distant cells, 
-    cell_coords: cell by cell distance matrix by centroid location, 
-    centroid_dist: cell by cell distance matrix by centroid location, 
-    '''
-    # Compute cell-cell distance based on their recorded centroids 
+def calculate_mask_distance(adata: sc.AnnData,
+                            cell_coords: gpd.GeoDataFrame,
+                            max_centroid_dist: int=15,
+                            min_centroid_dist: int=0,
+                            cluster_col: str='leiden',
+                            x_col: str='x',
+                            y_col: str='y',
+                            geometry_col: str='Geometry',
+                            re_cal_centroid_dist: bool=False) -> pd.DataFrame:
+    """Calculate cell-cell distance based on their cell masks. The calculation is only done among 
+    neighboring cells of different types. 
+
+    Parameters
+    ----------
+    adata : sc.AnnData
+        The AnnData object containing cell metainformation
+    cell_coords : gpd.GeoDataFrame
+        The geodataframe recording the vertices of all the cells 
+    max_centroid_dist : int, optional
+        The threshold on cell-cell centroid distances beyond which we do not consider two cells being neighbors, by default 15
+    min_centroid_dist : int, optional
+        The threshold on cell-cell centroid distances under which we do not consider two cells being neighbors, by default 0
+    cluster_col : str, optional
+        Column name for cell clustering, by default 'leiden'
+    x_col : str, optional
+        Column name for the x coordinate, by default 'x'
+    y_col : str, optional
+        Column name for the y coordinate, by default 'y'
+    geometry_col : str, optional
+        Column name for the polygons, by default 'Geometry'
+    re_cal_centroid_dist : bool, optional
+        If centroid distances should be recorded, by default False
+
+    Returns
+    -------
+    pd.DataFrame
+        A dataframe where each row is a pair of neighboring cells as well as their distance information 
+    """
+    
+    # First, we compute cell-cell distance matrix based on their recorded centroids 
     centroid_dist = cdist(adata.obs[['x','y']],adata.obs[['x','y']])
     centroid_dist = pd.DataFrame(centroid_dist, index = adata.obs_names, columns=adata.obs_names)
-    
-    
+    # As computing mask distances between all pairs of cells would take too long
+    # we use the centroid distance to filter out the majority of the cells 
+    # We then create the adjacency matrix: 
+    # Any cell that is within in the specified threshold: max_centroid_dist is considered a neighbor
     adj = (centroid_dist > min_centroid_dist) & (centroid_dist<= max_centroid_dist)
-    adj = adj.agg(
-        lambda x: adj.columns[x.values].tolist(), axis=1)
+    # For each cell, we record its neighbors as a list
+    adj = adj.agg(lambda x: adj.columns[x.values].tolist(), axis=1)
     adj = pd.DataFrame(adj, columns = ['n'])
-    # pandas suggest using transform, but it did not work.
-    adj = adj.agg(
-        lambda x: [
-            y for y in x.n if cell_coords.loc[y, cluster_col]!=cell_coords.loc[x.name, cluster_col]
-            ], axis=1)
+    # We further exclude cells from the same cell cluster
+    # since we are only interested in comparing the transcript abundances among cells of different types 
+    adj = adj.agg(lambda x: [
+            y for y in x.n if adata.obs.loc[y, cluster_col]!=adata.obs.loc[x.name, cluster_col]], axis=1)
+    # We then exclude cells surrounded by cells of its own type 
     adj_nonself = adj[adj.apply(len)>0]
+    # Then we compute the cell-cell distance based on their masks
     adj_nonself_masks_ids = adj_nonself.explode()
     md = distance(
         cell_coords.loc[adj_nonself_masks_ids.index, geometry_col].values,
         cell_coords.loc[adj_nonself_masks_ids.values, geometry_col].values
     )
-    masks_distances = pd.DataFrame(
-        adj_nonself_masks_ids, columns=['neaghbor_by_centroid'])
-    masks_distances['mask_distance'] = md
+    mask_distance = pd.DataFrame(
+        adj_nonself_masks_ids, columns=['neighbor_by_centroid'])
+    mask_distance['mask_distance'] = md
     # recalculating the centroid distance is expansive, so it should be avoided
     if re_cal_centroid_dist:
-        v1 = cell_coords.loc[masks_distances.index, [x_col, y_col]].values
-        v2 = cell_coords.loc[masks_distances.neaghbor_by_centroid, [x_col, y_col]].values
-        masks_distances['centroid_distance'] = np.sum((v1-v2)**2, axis=1)**0.5
-    return masks_distances
-
-
-
-def process_counts(df: pd.DataFrame, target_sum = 200):
-    df = sc.AnnData(df)
-    sc.pp.normalize_total(df, target_sum=target_sum)
-    sc.pp.log1p(df)
-    return df.to_df()
+        v1 = cell_coords.loc[mask_distance.index, [x_col, y_col]].values
+        v2 = cell_coords.loc[mask_distance.neighbor_by_centroid, [x_col, y_col]].values
+        mask_distance['centroid_distance'] = np.sum((v1-v2)**2, axis=1)**0.5
+    return mask_distance
 
 
 def annotate_tx_mask_distance(
