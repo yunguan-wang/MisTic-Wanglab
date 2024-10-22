@@ -15,7 +15,7 @@ from typing import Optional, Union, Tuple
 def import_data(cell_by_gene_counts: Union[str, pd.DataFrame],
                 cell_metadata: Union[str, pd.DataFrame],
                 cell_boundary_polygons: Union[str, gpd.GeoDataFrame],
-                detected_transcripts: Union[str, pd.DataFrame]) -> Tuple[sc.AnnData, pd.DataFrame, gpd.GeoDataFrame]:
+                detected_transcripts: Union[str, pd.DataFrame]) -> Tuple[sc.AnnData, gpd.GeoDataFrame, gpd.GeoDataFrame]:
     """Read in the four pieces information needed for subsequent analysis: 
     cell-by-gene counts, cell metadata, cell boundary information, and transcript information. Some 
     basic visualization and cell clustering will be performed. 
@@ -43,7 +43,7 @@ def import_data(cell_by_gene_counts: Union[str, pd.DataFrame],
 
     Returns
     -------
-    Tuple[sc.AnnData, pd.DataFrame, gpd.GeoDataFrame]
+    Tuple[sc.AnnData, gpd.GeoDataFrame, gpd.GeoDataFrame]
         An AnnData object containing the original counts and some metainformation. The detected transcript as well as the polygons. 
     """
     
@@ -66,11 +66,15 @@ def import_data(cell_by_gene_counts: Union[str, pd.DataFrame],
         cell_coords = cell_boundary_polygons
     
     # Transcript information 
+    # We also convert the pandas dataframe to geopandas geodataframe 
+    # by constructing points from the locations of each transcript
     if isinstance(detected_transcripts, str):
         tx_metadata = pd.read_csv(detected_transcripts, index_col=0)    
     else:
         tx_metadata = detected_transcripts
-        
+    
+    tx_metadata = gpd.GeoDataFrame(tx_metadata, 
+                                   geometry=gpd.points_from_xy(tx_metadata.global_x, tx_metadata.global_y))
     # Create AnnData object to store the counts 
     # and facilitate future processing 
     adata = sc.AnnData(counts)
@@ -172,27 +176,67 @@ def calculate_mask_distance(adata: sc.AnnData,
     return mask_distance
 
 
-def annotate_tx_mask_distance(df, # df is return from calculate_mask_distance
-        tx_metadata,
-        cell_coords,
-        x_col = 'global_x',
-        y_col = 'global_y',
-        cell_col = 'cell_id',
-        gene_col = 'gene',
-        tx_col = 'molecule_id'):
-    df = df.copy()
-    intf_tx = tx_metadata[
-        tx_metadata.cell_id.isin(df.index)][[x_col,y_col,cell_col,gene_col,tx_col]]
-    intf_tx.columns = ['x','y','cell_id','gene','molecule_id']
+def annotate_tx_mask_distance(adata: sc.AnnData,
+                                tx_metadata: gpd.GeoDataFrame,
+                                cell_coords: gpd.GeoDataFrame,
+                                mask_distance: pd.DataFrame, 
+                                mask_dist_cutoff: float=1, 
+                                x_col: str='global_x',
+                                y_col: str='global_y',
+                                cell_col: str='cell_id',
+                                gene_col: str='gene',
+                                tx_col: str='molecule_id',
+                                cluster_col: str='leiden',
+                                geometry_col: str='Geometry') -> gpd.GeoDataFrame:
+    """_summary_
+
+    Parameters
+    ----------
+    adata : sc.AnnData
+        The AnnData object containing cell metainformation
+    tx_metadata : gpd.GeoDataFrame
+        _description_
+    cell_coords : gpd.GeoDataFrame
+        The geodataframe recording the vertices of all the cells 
+    mask_distance : pd.DataFrame
+        The cell-cell distance based on cell masks 
+    mask_dist_cutoff : float, optional
+        The threshold of cell-cell distances beyond which , by default 1
+    x_col : str, optional
+        _description_, by default 'global_x'
+    y_col : str, optional
+        _description_, by default 'global_y'
+    cell_col : str, optional
+        _description_, by default 'cell_id'
+    gene_col : str, optional
+        _description_, by default 'gene'
+    tx_col : str, optional
+        _description_, by default 'molecule_id'
+    cluster_col : str, optional
+        _description_, by default 'leiden'
+    geometry_col : str, optional
+        _description_, by default 'Geometry'
+
+    Returns
+    -------
+    gpd.GeoDataFrame
+        _description_
+    """
+    # Based on the cell-cell distance computed via cell masks 
+    # we find cells (interface cells) that are close to their neighbors (identified via cell centroids)
+    # Note that in computing the mask distance, we only included pairs 
+    # of cells that of different types 
+    interface = mask_distance[mask_distance.mask_distance<=mask_dist_cutoff]
+    # We extract transcripts of those interface cells 
+    intf_tx = tx_metadata[tx_metadata.cell_id.isin(interface.index)][[x_col,y_col,cell_col,gene_col,tx_col, geometry_col]]
+    intf_tx.columns = ['x','y','cell_id','gene','molecule_id', 'tx_geom']
+    # Then we compute the distance between transcript and cell mask of neighboring cell
     intf_tx = intf_tx.merge(
-        df[['neaghbor_by_centroid','mask_distance']], left_on='cell_id', right_index=True
-        )
-    intf_tx['tx_geom'] = intf_tx[['x','y']].apply(lambda x: Point(x.iloc[0],x.iloc[1]),axis=1)
-    intf_tx['mask_geom'] = cell_coords.loc[
-        intf_tx.neaghbor_by_centroid.values, 'Geometry'].values
+        interface[['neighbor_by_centroid','mask_distance']], left_on='cell_id', right_index=True)
+    intf_tx['mask_geom'] = cell_coords.loc[intf_tx.neighbor_by_centroid.values, geometry_col].values
     intf_tx['tx_mask_distance'] = distance(intf_tx['tx_geom'], intf_tx['mask_geom'])
-    intf_tx['celltype'] = cell_coords.loc[intf_tx.cell_id,'leiden'].values
-    intf_tx['neaby_celltype'] = cell_coords.loc[intf_tx.neaghbor_by_centroid,'leiden'].values
+    intf_tx['celltype'] = adata.obs.loc[intf_tx.cell_id, cluster_col].values
+    intf_tx['neighbor_celltype'] = adata.obs.loc[intf_tx.neighbor_by_centroid, cluster_col].values
     return intf_tx
 
 
@@ -204,23 +248,24 @@ def mix_norm_cdf(x, model):
     return mcdf
 
 
-def remove_tx(
-        counts: pd.DataFrame, 
-        cell_coords: pd.DataFrame, 
-        intf_tx: pd.DataFrame, # returned by annotate_tx_mask_distance
-        tx_mask_d_max: float = 2.0,
-        hard_threshold: Optional[float]=None):
+def remove_tx(adata: sc.AnnData, 
+                layer: str, 
+                cell_coords: gpd.GeoDataFrame, 
+                intf_tx: gpd.GeoDataFrame, 
+                tx_mask_d_max: float = 2.0,
+                hard_threshold: Optional[float]=None):
+
 
     intf_tx = intf_tx.copy()
-    s_total = counts.groupby(cell_coords.leiden).count()
-    s_above_0 = (counts>0).groupby(cell_coords.leiden).sum()
+    s_total = adata.layers[layer].groupby(adata.obs.leiden).count()
+    s_above_0 = (adata.layers[layer]>0).groupby(adata.obs.leiden).sum()
     percent_pos = s_above_0 / s_total
 
     intf_tx = intf_tx[intf_tx.tx_mask_distance<tx_mask_d_max].sort_values('tx_mask_distance')
     intf_tx['pct_exp_celltype'] = intf_tx.apply(
         lambda x: percent_pos.loc[x['celltype'],x['gene']], axis=1).values
     intf_tx['pct_exp_nearby'] = intf_tx.apply(
-        lambda x: percent_pos.loc[x['neaby_celltype'],x['gene']], axis=1).values
+        lambda x: percent_pos.loc[x['neighbor_celltype'],x['gene']], axis=1).values
     intf_tx['pct_diff'] = intf_tx.pct_exp_nearby - intf_tx.pct_exp_celltype
     
     if hard_threshold is None:
@@ -236,7 +281,7 @@ def remove_tx(
                 model.fit(fold_change.values.reshape((-1,1)))
                 gmm_dict["{}-{}".format(cell_type0, cell_type1)] = model
         intf_tx['remove_prob'] = intf_tx.apply(lambda x: mix_norm_cdf(x['pct_diff'],
-                                                gmm_dict["{}-{}".format(x['celltype'], x['neaby_celltype'])]), axis=1).values
+                                                gmm_dict["{}-{}".format(x['celltype'], x['neighbor_celltype'])]), axis=1).values
 
         intf_tx['remove'] = np.random.binomial(1, intf_tx['remove_prob'])
     else:
