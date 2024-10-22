@@ -1,60 +1,103 @@
 import numpy as np
 import scanpy as sc
+import geopandas as gpd
 from geopandas import read_parquet
 import pandas as pd
 
 from shapely import Point, Polygon, distance
+from scipy.spatial.distance import cdist
+
 from scipy.stats import norm
 from sklearn.mixture import GaussianMixture as GMM
-from typing import Optional
+from typing import Optional, Union, Tuple
 
 
-def import_data(h5ad_path, 
-                detected_transcripts_path,
-                cell_metadata_path,
-                cell_by_gene_path,
-                cell_boundaries_path):
-    # Read annData
-    adata = sc.read_h5ad(h5ad_path)
-    # Read transcript data 
-    tx_metadata = pd.read_csv(detected_transcripts_path, index_col=0)
-    cell_meta = pd.read_csv(cell_metadata_path, index_col=0)
-    # cell by gene count matrix 
-    counts = pd.read_csv(cell_by_gene_path, index_col=0)
-    # Cell boundary
-    cell_coords = read_parquet(cell_boundaries_path)
-    # We filter out gene columns with "Blank"
-    blanks = [x for x in counts.columns if 'Blank' in x]
-    counts = counts.drop(blanks, axis=1)
-    # As cell ids are different in cell_meta and counts 
-    cell_id_mapping = pd.Series(
-        ['cell_' + str(x) for x in range(len(counts))],
-        index = counts.index,
-    )
-    counts.index = cell_id_mapping.loc[counts.index]
-    counts = counts.loc[adata.obs_names]
+def import_data(cell_by_gene_counts: Union[str, pd.DataFrame],
+                cell_metadata: Union[str, pd.DataFrame],
+                cell_boundary_polygons: Union[str, gpd.GeoDataFrame],
+                detected_transcripts: Union[str, pd.DataFrame]) -> Tuple[sc.AnnData, pd.DataFrame, gpd.GeoDataFrame]:
+    """Read in the four pieces information needed for subsequent analysis: 
+    cell-by-gene counts, cell metadata, cell boundary information, and transcript information. Some 
+    basic visualization and cell clustering will be performed. 
 
-    adata.layers['counts_0'] = counts.copy()
+    Parameters
+    ----------
+    cell_by_gene_counts : Union[str, pd.DataFrame]
+        Either the path to the csv file or a pandas dataframe containing the cell-by-gene count matrix whose first 
+        column is assumed to contain the ID for each cell while the rest of the columns should be the transcript counts
+        for each cell. 
+    cell_metadata : Union[str, pd.DataFrame]
+        Either the path to the csv file or a pandas dataframe containing the metadata for each cell whose 
+        first column is assumed to contain the ID for each cell. The information in the file/object should 
+        at least contain the xy coordinates of the centers of cells named center_x, and center_y, respectively.
+        If the users have already performed cell typing which is not required and will only be used for visualization,
+        the information can be stored here as a separate column: cell_type.
+    cell_boundary_polygons : Union[str, gpd.GeoDataFrame]
+        Either the path to the parquet file or the geopandas GeoDataFrame containing the vertex information 
+        for each cell. The first column is assumed to be the IDs for cells. It should contain one column 'Geometry'
+        that records the coordinates of the vertices.
+    detected_transcripts : Union[str, pd.DataFrame]
+        Either the path to the csv file or a pandas dataframe containing the information of the detected transcripts.
+        The first column is assumed to be some index. The information should contain the ID for a transcripte/molecule, 
+        the ID of the cell it belongs to, its xy coordinate named x, y respectively, and its gene information. 
 
-    cell_meta.index = cell_id_mapping[cell_meta.index]
-    cell_meta = cell_meta.loc[adata.obs_names]
-    tx_metadata = tx_metadata[tx_metadata.cell_id!=0]
-    tx_metadata = tx_metadata[~tx_metadata.gene.isin(blanks)]
-    tx_metadata.cell_id = cell_id_mapping[tx_metadata.cell_id].values
-    tx_metadata = tx_metadata[tx_metadata.cell_id.isin(adata.obs_names)]
-    tx_metadata['molecule_id'] = ['m' + str(i+1) for i in range(len(tx_metadata))]
+    Returns
+    -------
+    Tuple[sc.AnnData, pd.DataFrame, gpd.GeoDataFrame]
+        An AnnData object containing the original counts and some metainformation. The detected transcript as well as the polygons. 
+    """
+    
+    # Cell by gene counts matrix 
+    if isinstance(cell_by_gene_counts, str):
+        counts = pd.read_csv(cell_by_gene_counts, index_col=0)
+    else:
+        counts = cell_by_gene_counts
+    
+    # Cell metadata
+    if isinstance(cell_metadata, str):
+        cell_meta = pd.read_csv(cell_metadata, index_col=0)
+    else: 
+        cell_meta = cell_metadata
+    
+    # Polygons of cells 
+    if isinstance(cell_boundary_polygons, str):
+        cell_coords = read_parquet(cell_boundary_polygons)
+    else: 
+        cell_coords = cell_boundary_polygons
+    
+    # Transcript information 
+    if isinstance(detected_transcripts, str):
+        tx_metadata = pd.read_csv(detected_transcripts, index_col=0)    
+    else:
+        tx_metadata = detected_transcripts
+        
+    # Create AnnData object to store the counts 
+    # and facilitate future processing 
+    adata = sc.AnnData(counts)
     adata.obs['x'] = cell_meta.loc[adata.obs_names,'center_x']
     adata.obs['y'] = cell_meta.loc[adata.obs_names,'center_y']
-
-    metadata = adata.obs
-    entity_ids = metadata.index.values
-    cell_coords.EntityID = cell_id_mapping.loc[cell_coords.EntityID].values
-    cell_coords = cell_coords[cell_coords.EntityID.isin(entity_ids)]
-    cell_coords = cell_coords.drop_duplicates(subset=['EntityID','Geometry'])
-    cell_coords.index = cell_coords.EntityID
-
+    if "cell_type" in cell_meta.columns:
+        adata.obs['cell_type'] = cell_meta.loc[adata.obs_names,'cell_type']
+    # As we will alter the counts later on, we will save a copy of the 
+    # original count in one of the layers 
+    adata.layers['counts_0'] = counts.copy()
+    # Then we perform basic normalization and transformation 
+    print("="*30)
+    print("Successfully read in data. Performing basic transformation")
+    sc.pp.normalize_total(adata)
+    sc.pp.log1p(adata)
+    # We also perform basic visualization 
+    print("UMAP")
+    sc.pp.neighbors(adata)
+    sc.tl.umap(adata)
+    # And we will use leiden to perform cell clustering 
+    print("Leiden")
+    sc.tl.leiden(adata, resolution=1)
+    print("Done~")
+    print("="*30)
     return adata, tx_metadata, cell_coords
     
+
 
 def calculate_mask_distance(
     centroid_dist: pd.DataFrame,
@@ -74,6 +117,11 @@ def calculate_mask_distance(
     cell_coords: cell by cell distance matrix by centroid location, 
     centroid_dist: cell by cell distance matrix by centroid location, 
     '''
+    # Compute cell-cell distance based on their recorded centroids 
+    centroid_dist = cdist(adata.obs[['x','y']],adata.obs[['x','y']])
+    centroid_dist = pd.DataFrame(centroid_dist, index = adata.obs_names, columns=adata.obs_names)
+    
+    
     adj = (centroid_dist > min_centroid_dist) & (centroid_dist<= max_centroid_dist)
     adj = adj.agg(
         lambda x: adj.columns[x.values].tolist(), axis=1)
