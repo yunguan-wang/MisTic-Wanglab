@@ -1,14 +1,14 @@
-import numpy as np
+# Data IO
 import scanpy as sc
 import geopandas as gpd
 from geopandas import read_parquet
 import pandas as pd
-
+# Data manipulation 
+import numpy as np
 from shapely import Point, Polygon, distance
 from scipy.spatial.distance import cdist
-
 from scipy.stats import norm
-from sklearn.mixture import GaussianMixture as GMM
+# Typing 
 from typing import Optional, Union, Tuple
 
 
@@ -90,7 +90,7 @@ def import_data(cell_by_gene_counts: Union[str, pd.DataFrame],
     # Then we perform basic normalization and transformation 
     print("="*30)
     print("Successfully read in data. Performing basic transformation")
-    sc.pp.normalize_total(adata)
+    sc.pp.normalize_total(adata, target_sum=1000)
     sc.pp.log1p(adata)
     # We also perform basic visualization 
     print("UMAP")
@@ -101,7 +101,7 @@ def import_data(cell_by_gene_counts: Union[str, pd.DataFrame],
     sc.tl.leiden(adata, resolution=1)
     print("Done~")
     print("="*30)
-    return adata, tx_metadata, cell_coords
+    return adata, cell_coords, tx_metadata
     
 
 
@@ -235,106 +235,14 @@ def annotate_tx_mask_distance(adata: sc.AnnData,
     return intf_tx
 
 
+####################################
+# Wait till future updates
 def mix_norm_cdf(x, model):
     weights, means, covars = model.weights_, model.means_.reshape(-1), model.covariances_.reshape(-1)
     mcdf = 0.0
     for i in range(len(weights)):
         mcdf += weights[i] * norm.cdf(x, loc=means[i], scale=np.sqrt(covars[i]))
     return mcdf
-
-
-def reassign_tx(adata: sc.AnnData, 
-                layer: str, 
-                intf_tx: gpd.GeoDataFrame, 
-                tx_mask_d_max: float = 2.0,
-                hard_threshold: Optional[float]=None) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    """Generate updates to the cell-by-gene counts matrix and the transcript matrix 
-
-    Parameters
-    ----------
-    adata : sc.AnnData
-        The AnnData object containing cell metainformation
-    layer : str
-        The layer upon which the update is computed 
-    intf_tx : gpd.GeoDataFrame
-        Distance information on transcripts to neighboring cells 
-    tx_mask_d_max : float, optional
-        The threshold beyond which we do not consider a certain transcript as a membrane transcript, by default 2.0
-    hard_threshold : Optional[float], optional
-        The threshold on the difference of percentages, by default None
-
-    Returns
-    -------
-    Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]
-        Updates to counts and transcript matrices 
-    """
-    # The basic logic for reassigning transcript is based on the difference of the 
-    # expressed transcripts between two types of cells 
-    # If a type of transcript is lowly expressed in a cell but some transcripts of that type are 
-    # present in that cell and the neighboring cell highly express that transcript, we reassign that transcripts 
-    # We first compute the percentages of positively expressed genes in each cell type
-    s_total = adata.to_df(layer).groupby(adata.obs.leiden, observed=True).count()
-    s_above_0 = (adata.to_df(layer)>0).groupby(adata.obs.leiden, observed=True).sum()
-    percent_pos = s_above_0 / s_total
-    
-    # We only consider membrane transcripts 
-    intf_tx = intf_tx[intf_tx.tx_mask_distance<tx_mask_d_max].sort_values('tx_mask_distance')
-    # Then we compute the differences in the percentages 
-    intf_tx['pct_exp_celltype'] = intf_tx.apply(
-        lambda x: percent_pos.loc[x['celltype'],x['gene']], axis=1).values
-    intf_tx['pct_exp_nearby'] = intf_tx.apply(
-        lambda x: percent_pos.loc[x['neighbor_celltype'],x['gene']], axis=1).values
-    intf_tx['pct_diff'] = intf_tx.pct_exp_nearby - intf_tx.pct_exp_celltype
-    
-    if hard_threshold is None:
-        # Do not use 
-        # Not completed 
-        gmm_dict = {}
-        for cell_type0 in percent_pos.index:
-            for cell_type1 in percent_pos.index:
-                if cell_type0 == cell_type1:
-                    continue
-                # 0 vs other (if > 0 then gene expressed)
-                # only consider > 0
-                fold_change = np.log2(percent_pos.loc[cell_type0,:]+1) - np.log2(percent_pos.loc[cell_type1, :]+1)
-                model = GMM(2)
-                model.fit(fold_change.values.reshape((-1,1)))
-                gmm_dict["{}-{}".format(cell_type0, cell_type1)] = model
-        intf_tx['remove_prob'] = intf_tx.apply(lambda x: mix_norm_cdf(x['pct_diff'],
-                                                gmm_dict["{}-{}".format(x['celltype'], x['neighbor_celltype'])]), axis=1).values
-
-        intf_tx['reassign'] = np.random.binomial(1, intf_tx['remove_prob'])
-    else:
-        # If its greater than the threshold, we reassign the transcript 
-        intf_tx['reassign'] = (intf_tx['pct_diff']>=hard_threshold).astype(int)
-    
-    tx_to_reassign = intf_tx[intf_tx['reassign']==1]
-    # We only keep the cell that is closest to the transcript 
-    tx_to_reassign = tx_to_reassign.groupby(tx_to_reassign.molecule_id).first()
-    
-    # Generate two patches for the count matrix 
-    counts_to_subtract = pd.DataFrame(0, index=adata.obs_names, columns=adata.var_names)
-    counts_to_add = pd.DataFrame(0, index=adata.obs_names, columns=adata.var_names)
-    # For removal, we for each cell count how many genes occured 
-    cell_to_remove = tx_to_reassign.groupby(by=['cell_id', "gene"], as_index=False).size()
-    # For addition, we for each cell in the neighbor count how many genes occured 
-    cell_to_add = tx_to_reassign.groupby(by=['neighbor_by_centroid', "gene"], as_index=False).size()
-    cell_to_add.rename(columns={"neighbor_by_centroid": "cell_id"}, inplace=True)
-    # Transform the dataframe from long to wide 
-    subtract_patch = pd.pivot(cell_to_remove, values="size", columns="gene", index='cell_id').fillna(0)
-    add_patch = pd.pivot(cell_to_add, values="size", columns="gene", index='cell_id').fillna(0)
-    # The update the find matching rows and columns 
-    counts_to_subtract.update(subtract_patch)
-    counts_to_add.update(add_patch)
-    
-    # Finally, record which transcript should be assigned to which cell as well as its original assignment
-    tx_assignment_update = tx_to_reassign[['neighbor_by_centroid']].rename(columns={"neighbor_by_centroid": "cell_id"})
-    tx_assignment_original = tx_to_reassign[['cell_id']]
-
-    return counts_to_subtract, counts_to_add, tx_assignment_update, tx_assignment_original
-
-
-
 
 
 

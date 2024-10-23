@@ -1,57 +1,179 @@
+# Data IO 
 import pandas as pd
 import scanpy as sc
-from scipy.spatial.distance import cdist
-from copy import deepcopy
-from utility import calculate_mask_distance, annotate_tx_mask_distance, remove_tx
+import geopandas as gpd
+# Data manipulation 
+import numpy as np
+from sklearn.mixture import GaussianMixture as GMM
+from sklearn.linear_model import LogisticRegression
+from scipy.stats import entropy
+# Utility functions 
+from utility import calculate_mask_distance, annotate_tx_mask_distance, mix_norm_cdf
+# Typing 
+from typing import Tuple, Union, Optional 
 
 
-def propose_adjustment(adata,
-                       cell_coords,
-                       tx_metadata,
-                       mask_dist_cutoff=1):
+def propose_reassignment(adata: sc.AnnData, 
+                         tx_metadata: gpd.GeoDataFrame,
+                         cell_coords: gpd.GeoDataFrame,
+                         layer: str, 
+                         mask_dist_cutoff: float=1, 
+                         tx_mask_d_max: float = 2.0,
+                         hard_threshold: Optional[float]=None) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Generate updates to the cell-by-gene counts matrix and the transcript matrix 
+
+    Parameters
+    ----------
+    adata : sc.AnnData
+        The AnnData object containing cell metainformation
+    tx_metadata : gpd.GeoDataFrame
+        The detected transcripts
+    cell_coords : gpd.GeoDataFrame
+        The geodataframe recording the vertices of all the cells 
+    layer : str
+        The layer upon which the update is computed 
+    mask_dist_cutoff : float, optional
+        The threshold of cell-cell distances beyond which a cell is no longer considered a neighbor, by default 1
+    tx_mask_d_max : float, optional
+        The threshold beyond which we do not consider a certain transcript as a membrane transcript, by default 2.0
+    hard_threshold : Optional[float], optional
+        The threshold on the difference of percentages, by default None
+
+    Returns
+    -------
+    Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]
+        Updates to counts and transcript matrices 
+    """
+    mask_distance  = calculate_mask_distance(adata=adata,
+                                             cell_coords=cell_coords)
+    intf_tx = annotate_tx_mask_distance(adata=adata,
+                                        tx_metadata=tx_metadata,
+                                        cell_coords=cell_coords,
+                                        mask_distance=mask_distance, 
+                                        mask_dist_cutoff=mask_dist_cutoff)
+    # The basic logic for reassigning transcript is based on the difference of the 
+    # expressed transcripts between two types of cells 
+    # If a type of transcript is lowly expressed in a cell but some transcripts of that type are 
+    # present in that cell and the neighboring cell highly express that transcript, we reassign that transcripts 
+    # We first compute the percentages of positively expressed genes in each cell type
+    s_total = adata.to_df(layer).groupby(adata.obs.leiden, observed=True).count()
+    s_above_0 = (adata.to_df(layer)>0).groupby(adata.obs.leiden, observed=True).sum()
+    percent_pos = s_above_0 / s_total
     
-    # It is now evident masks can still be very close even when centroid distance is above 40
-    mask_distance  = calculate_mask_distance(
-        cell_dist, cell_coords, max_centroid_dist=75, re_cal_centroid_dist=True)
-    interface = mask_distance[mask_distance.mask_distance<=mask_dist_cutoff]
-    intf_tx = annotate_tx_mask_distance(
-        interface, tx_metadata, cell_coords)
+    # We only consider membrane transcripts 
+    intf_tx = intf_tx[intf_tx.tx_mask_distance<tx_mask_d_max].sort_values('tx_mask_distance')
+    # Then we compute the differences in the percentages 
+    intf_tx['pct_exp_celltype'] = intf_tx.apply(
+        lambda x: percent_pos.loc[x['celltype'],x['gene']], axis=1).values
+    intf_tx['pct_exp_nearby'] = intf_tx.apply(
+        lambda x: percent_pos.loc[x['neighbor_celltype'],x['gene']], axis=1).values
+    intf_tx['pct_diff'] = intf_tx.pct_exp_nearby - intf_tx.pct_exp_celltype
     
-    current_counts = counts.copy()
-    current_adata = deepcopy(adata)
+    if hard_threshold is None:
+        # Do not use 
+        # Not completed 
+        gmm_dict = {}
+        for cell_type0 in percent_pos.index:
+            for cell_type1 in percent_pos.index:
+                if cell_type0 == cell_type1:
+                    continue
+                # 0 vs other (if > 0 then gene expressed)
+                # only consider > 0
+                fold_change = np.log2(percent_pos.loc[cell_type0,:]+1) - np.log2(percent_pos.loc[cell_type1, :]+1)
+                model = GMM(2)
+                model.fit(fold_change.values.reshape((-1,1)))
+                gmm_dict["{}-{}".format(cell_type0, cell_type1)] = model
+        intf_tx['remove_prob'] = intf_tx.apply(lambda x: mix_norm_cdf(x['pct_diff'],
+                                                gmm_dict["{}-{}".format(x['celltype'], x['neighbor_celltype'])]), axis=1).values
 
-    current_cell_coords = cell_coords.copy()
-
-    current_cell_coords.drop(columns=['x','y','leiden'], inplace=True)
-    current_cell_coords = current_cell_coords.merge(
-        current_adata.obs[['x','y','leiden']], right_index=True, left_index=True, how='left')
-    interface = mask_distance[mask_distance.mask_distance<=mask_dist_cutoff]
-    current_intf_tx = annotate_tx_mask_distance(
-        interface, tx_metadata, current_cell_coords)
-
-    counts_to_subtract, counts_to_add, current_intf_tx = remove_tx(current_counts, current_cell_coords, current_intf_tx,
-                                                                   hard_threshold=0.25)
+        intf_tx['reassign'] = np.random.binomial(1, intf_tx['remove_prob'])
+    else:
+        # If its greater than the threshold, we reassign the transcript 
+        intf_tx['reassign'] = (intf_tx['pct_diff']>=hard_threshold).astype(int)
     
-    proposed_counts = current_counts.copy()
-    proposed_counts.loc[current_counts_update.index,current_counts_update.columns] = current_counts_update.values
-    proposed_adata = sc.AnnData(proposed_counts)
-    proposed_adata.obs = current_adata.obs.loc[proposed_adata.obs_names]
-    proposed_adata.obs['celltype'] = current_adata.obs.loc[proposed_adata.obs_names, 'leiden']
-    sc.pp.normalize_total(proposed_adata, target_sum=1000)
+    tx_to_reassign = intf_tx[intf_tx['reassign']==1]
+    # We only keep the cell that is closest to the transcript 
+    tx_to_reassign = tx_to_reassign.groupby(tx_to_reassign.molecule_id).first()
+    
+    # Generate two patches for the count matrix 
+    counts_to_subtract = pd.DataFrame(0, index=adata.obs_names, columns=adata.var_names)
+    counts_to_add = pd.DataFrame(0, index=adata.obs_names, columns=adata.var_names)
+    # For removal, we for each cell count how many genes occured 
+    cell_to_remove = tx_to_reassign.groupby(by=['cell_id', "gene"], as_index=False).size()
+    # For addition, we for each cell in the neighbor count how many genes occured 
+    cell_to_add = tx_to_reassign.groupby(by=['neighbor_by_centroid', "gene"], as_index=False).size()
+    cell_to_add.rename(columns={"neighbor_by_centroid": "cell_id"}, inplace=True)
+    # Transform the dataframe from long to wide 
+    subtract_patch = pd.pivot(cell_to_remove, values="size", columns="gene", index='cell_id').fillna(0)
+    add_patch = pd.pivot(cell_to_add, values="size", columns="gene", index='cell_id').fillna(0)
+    # The update the find matching rows and columns 
+    counts_to_subtract.update(subtract_patch)
+    counts_to_add.update(add_patch)
+    
+    # Finally, record which transcript should be assigned to which cell as well as its original assignment
+    tx_assignment_update = tx_to_reassign[['neighbor_by_centroid']].rename(columns={"neighbor_by_centroid": "cell_id"})
+    tx_assignment_original = tx_to_reassign[['cell_id']]
 
-    sc.pp.log1p(proposed_adata)
-    # np.nan_to_num(proposed_adata.X, nan=0, copy=False)
-    proposed_adata.raw = proposed_adata.copy()
-
-    return 0
+    return counts_to_subtract, counts_to_add, tx_assignment_update, tx_assignment_original
 
 
-def test_proposed_adjustment():
+def test_proposed_reassignment(adata: sc.AnnData,
+                               layer: str,
+                               counts_to_subtract: pd.DataFrame,
+                               counts_to_add: pd.DataFrame):
+    
+    
+    adata.layers[layer+"_proposed_update"] = adata.layers[layer]+counts_to_add-counts_to_subtract 
+    index_w_updates = (counts_to_add.sum(axis=1)>0) | (counts_to_subtract.sum(axis=1)>0)
+    index_wo_updates = (counts_to_add.sum(axis=1)==0) & (counts_to_subtract.sum(axis=1)==0)
+    
+    cell_types = np.unique(adata.obs['leiden'])
+    test_result = {cell_type: {} for cell_type in cell_types}
+    for cell_type in cell_types:
+        index_other_type = (adata.obs['leiden'] != cell_type) & index_wo_updates
+        index_other_type = index_other_type[index_other_type].index
+        
+        x_train = adata.to_df(layer).loc[index_wo_updates, :]
+        y_train = adata.obs.loc[index_wo_updates, ['leiden']].astype(str)
+        y_train.loc[index_other_type, "leiden"] = "other"
+        classifier = LogisticRegression(max_iter=10000, class_weight='balanced')
+        classifier.fit(x_train, y_train['leiden'].values)
+        
+        index_cell_type = (adata.obs['leiden'] == cell_type) & index_w_updates
+        x_test_original = adata.to_df(layer).loc[index_cell_type, :]
+        x_test_update = adata.to_df(layer+"_proposed_update").loc[index_cell_type, :]
+        
+        prediction_original = classifier.predict_proba(x_test_original)
+        prediction_udpate = classifier.predict_proba(x_test_update)
+        
+        entropy_original = pd.DataFrame(
+            entropy(prediction_original, axis=1),
+            columns=['entropy'],
+            index=x_test_original.index
+        )
+        entropy_update = pd.DataFrame(
+            entropy(prediction_udpate, axis=1),
+            columns=['entropy'],
+            index=x_test_update.index
+        )
+        
+        purer_cell_ids = x_test_original.index[entropy_update['entropy'] < entropy_original['entropy']]
+        contaminated_cell_ids = x_test_original.index[entropy_update['entropy'] >= entropy_original['entropy']]
+        
+        test_result[cell_type] = {"purer_cell_ids": purer_cell_ids,
+                                "contaminated_cell_ids": contaminated_cell_ids}
+
+    return test_result
+
+
+def reassign_tx(adata: sc.AnnData,
+                layer: str,
+                counts_to_subtract: pd.DataFrame,
+                counts_to_add: pd.DataFrame,
+                tx_assignment_update: pd.DataFrame, 
+                tx_assignment_original: pd.DataFrame):
     pass 
-
-
-def adjust_counts():
-    pass 
+     
 
 
 
