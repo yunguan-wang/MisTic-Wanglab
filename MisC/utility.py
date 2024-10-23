@@ -1,4 +1,7 @@
 # Data IO
+import h5py
+import os
+import sys
 import scanpy as sc
 import geopandas as gpd
 from geopandas import read_parquet
@@ -252,6 +255,34 @@ def extract_layer_num(layer: str) -> int:
     return int(re.findall(r'\d+', layer)[0])
     
 
+def assemble_cell_coords(input_path: str,
+                         output_path: str) -> None:
+    """Assemble the file containing the polygons of cell masks
+
+    Parameters
+    ----------
+    input_path : str
+        The input folder
+    output_path : str
+        The output folder
+    """
+    boundries_fn = os.listdir(input_path + '/cell_boundaries')
+    for bfn in boundries_fn:
+        cell_coords = pd.Series()
+        bfn = os.path.join(input_path, 'cell_boundaries', bfn)
+        f = h5py.File(bfn,'r')
+        for cell in list(f['featuredata']):
+            coords = np.array((f['featuredata'][cell]['zIndex_0']['p_0']['coordinates'][0]))
+            if coords.shape[0] >= 5:  
+                cell_coords[cell] = coords
+        f.close()
+        cell_coords = cell_coords.to_frame(name='coord')
+        cell_coords['X'] = cell_coords.coord.apply(lambda x: '_'.join(x[:,0].round(2).astype(str)))
+        cell_coords['Y'] = cell_coords.coord.apply(lambda x: '_'.join(x[:,1].round(2).astype(str)))
+        if os.path.exists(os.path.join(output_path, 'cell_coords.csv')):
+            cell_coords.iloc[:,1:].to_csv(output_path + '/cell_coords.csv', mode='a', header=False)
+        else:
+            cell_coords.iloc[:,1:].to_csv(output_path + '/cell_coords.csv') 
 
 
 ####################################
