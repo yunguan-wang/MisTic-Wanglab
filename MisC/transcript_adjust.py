@@ -6,14 +6,10 @@ from utility import calculate_mask_distance, annotate_tx_mask_distance, remove_t
 
 
 def propose_adjustment(adata,
-                       counts, 
                        cell_coords,
                        tx_metadata,
                        mask_dist_cutoff=1):
-    cell_coords = cell_coords.merge(
-        adata.obs[['x','y','leiden']], right_index=True, left_index=True, how='left')
-    cell_dist = cdist(adata.obs[['x','y']],adata.obs[['x','y']])
-    cell_dist = pd.DataFrame(cell_dist, index = adata.obs_names, columns=adata.obs_names)
+    
     # It is now evident masks can still be very close even when centroid distance is above 40
     mask_distance  = calculate_mask_distance(
         cell_dist, cell_coords, max_centroid_dist=75, re_cal_centroid_dist=True)

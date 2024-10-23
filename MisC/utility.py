@@ -75,6 +75,8 @@ def import_data(cell_by_gene_counts: Union[str, pd.DataFrame],
     
     tx_metadata = gpd.GeoDataFrame(tx_metadata, 
                                    geometry=gpd.points_from_xy(tx_metadata.global_x, tx_metadata.global_y))
+    tx_metadata.rename_geometry("Geometry", inplace=True)
+    tx_metadata.set_index("molecule_id", inplace=True)
     # Create AnnData object to store the counts 
     # and facilitate future processing 
     adata = sc.AnnData(counts)
@@ -108,8 +110,6 @@ def calculate_mask_distance(adata: sc.AnnData,
                             max_centroid_dist: int=15,
                             min_centroid_dist: int=0,
                             cluster_col: str='leiden',
-                            x_col: str='x',
-                            y_col: str='y',
                             geometry_col: str='Geometry',
                             re_cal_centroid_dist: bool=False) -> pd.DataFrame:
     """Calculate cell-cell distance based on their cell masks. The calculation is only done among 
@@ -127,10 +127,6 @@ def calculate_mask_distance(adata: sc.AnnData,
         The threshold on cell-cell centroid distances under which we do not consider two cells being neighbors, by default 0
     cluster_col : str, optional
         Column name for cell clustering, by default 'leiden'
-    x_col : str, optional
-        Column name for the x coordinate, by default 'x'
-    y_col : str, optional
-        Column name for the y coordinate, by default 'y'
     geometry_col : str, optional
         Column name for the polygons, by default 'Geometry'
     re_cal_centroid_dist : bool, optional
@@ -168,10 +164,11 @@ def calculate_mask_distance(adata: sc.AnnData,
     mask_distance = pd.DataFrame(
         adj_nonself_masks_ids, columns=['neighbor_by_centroid'])
     mask_distance['mask_distance'] = md
+    mask_distance.reset_index(inplace=True)
     # recalculating the centroid distance is expansive, so it should be avoided
     if re_cal_centroid_dist:
-        v1 = cell_coords.loc[mask_distance.index, [x_col, y_col]].values
-        v2 = cell_coords.loc[mask_distance.neighbor_by_centroid, [x_col, y_col]].values
+        v1 = adata.obs.loc[mask_distance.index, ['x','y']].values
+        v2 = adata.obs.loc[mask_distance.neighbor_by_centroid, ['x','y']].values
         mask_distance['centroid_distance'] = np.sum((v1-v2)**2, axis=1)**0.5
     return mask_distance
 
@@ -185,7 +182,6 @@ def annotate_tx_mask_distance(adata: sc.AnnData,
                                 y_col: str='global_y',
                                 cell_col: str='cell_id',
                                 gene_col: str='gene',
-                                tx_col: str='molecule_id',
                                 cluster_col: str='leiden',
                                 geometry_col: str='Geometry') -> gpd.GeoDataFrame:
     """_summary_
@@ -210,8 +206,6 @@ def annotate_tx_mask_distance(adata: sc.AnnData,
         _description_, by default 'cell_id'
     gene_col : str, optional
         _description_, by default 'gene'
-    tx_col : str, optional
-        _description_, by default 'molecule_id'
     cluster_col : str, optional
         _description_, by default 'leiden'
     geometry_col : str, optional
@@ -228,11 +222,11 @@ def annotate_tx_mask_distance(adata: sc.AnnData,
     # of cells that of different types 
     interface = mask_distance[mask_distance.mask_distance<=mask_dist_cutoff]
     # We extract transcripts of those interface cells 
-    intf_tx = tx_metadata[tx_metadata.cell_id.isin(interface.index)][[x_col,y_col,cell_col,gene_col,tx_col, geometry_col]]
-    intf_tx.columns = ['x','y','cell_id','gene','molecule_id', 'tx_geom']
+    intf_tx = tx_metadata[tx_metadata.cell_id.isin(interface.cell_id)][[x_col,y_col,cell_col,gene_col,geometry_col]]
+    intf_tx.columns = ['x','y','cell_id','gene','tx_geom']
+    intf_tx.reset_index(inplace=True)
     # Then we compute the distance between transcript and cell mask of neighboring cell
-    intf_tx = intf_tx.merge(
-        interface[['neighbor_by_centroid','mask_distance']], left_on='cell_id', right_index=True)
+    intf_tx = intf_tx.merge(interface[['cell_id','neighbor_by_centroid','mask_distance']], on='cell_id')
     intf_tx['mask_geom'] = cell_coords.loc[intf_tx.neighbor_by_centroid.values, geometry_col].values
     intf_tx['tx_mask_distance'] = distance(intf_tx['tx_geom'], intf_tx['mask_geom'])
     intf_tx['celltype'] = adata.obs.loc[intf_tx.cell_id, cluster_col].values
@@ -250,15 +244,14 @@ def mix_norm_cdf(x, model):
 
 def remove_tx(adata: sc.AnnData, 
                 layer: str, 
-                cell_coords: gpd.GeoDataFrame, 
+                tx_metadata: gpd.GeoDataFrame, 
                 intf_tx: gpd.GeoDataFrame, 
                 tx_mask_d_max: float = 2.0,
                 hard_threshold: Optional[float]=None):
 
-
-    intf_tx = intf_tx.copy()
-    s_total = adata.layers[layer].groupby(adata.obs.leiden).count()
-    s_above_0 = (adata.layers[layer]>0).groupby(adata.obs.leiden).sum()
+    # The basic logic for reassigning transcript is based on the difference 
+    s_total = adata.to_df(layer).groupby(adata.obs.leiden, observed=True).count()
+    s_above_0 = (adata.to_df(layer)>0).groupby(adata.obs.leiden, observed=True).sum()
     percent_pos = s_above_0 / s_total
 
     intf_tx = intf_tx[intf_tx.tx_mask_distance<tx_mask_d_max].sort_values('tx_mask_distance')
@@ -283,35 +276,30 @@ def remove_tx(adata: sc.AnnData,
         intf_tx['remove_prob'] = intf_tx.apply(lambda x: mix_norm_cdf(x['pct_diff'],
                                                 gmm_dict["{}-{}".format(x['celltype'], x['neighbor_celltype'])]), axis=1).values
 
-        intf_tx['remove'] = np.random.binomial(1, intf_tx['remove_prob'])
+        intf_tx['reassign'] = np.random.binomial(1, intf_tx['remove_prob'])
     else:
-        intf_tx['remove'] = (intf_tx['pct_diff']>=hard_threshold).astype(int)
+        intf_tx['reassign'] = (intf_tx['pct_diff']>=hard_threshold).astype(int)
     
-    c_g_remove = intf_tx[intf_tx['remove']==1]
-    # c_g_remove = intf_tx[intf_tx['pct_diff']>=0.25]
-    c_g_remove = c_g_remove.groupby(c_g_remove.molecule_id).first()
-    cells = c_g_remove.cell_id.unique()
-    counts_to_subtract = counts.loc[cells,:].copy()
-    removed_tx_ids = []
-    removed_tx_new_cell_ids = []
-    removed_gene_ids = []
-    for c in cells:
-        # Remove Tx from c
-        removed_genes = c_g_remove.loc[c_g_remove.cell_id==c].gene.tolist()
-        removed_gene_ids += removed_genes # actual gene names for reassigned transcripts
-        removed_genes, remove_counts = np.unique(removed_genes, return_counts=True)
-        counts_to_subtract.loc[c, removed_genes] -= remove_counts
-        # Add Tx to c's neighbor
-        removed_tx_ids += c_g_remove.loc[c_g_remove.cell_id==c].molecule_id.tolist() # get the transcripts that were reassigned
-        removed_tx_new_cell_ids += c_g_remove.loc[c_g_remove.cell_id==c].neaghbor_by_centroid.tolist() # get the cell ids that each transcript were reassigned to
+    tx_to_reassign = intf_tx[intf_tx['reassign']==1]
+    tx_to_reassign = tx_to_reassign.groupby(tx_to_reassign.molecule_id).first()
+    
+    counts_to_subtract = pd.DataFrame(0, index=adata.obs_names, columns=adata.var_names)
+    counts_to_add = pd.DataFrame(0, index=adata.obs_names, columns=adata.var_names)
+    
+    cell_to_remove = tx_to_reassign.groupby(by=['cell_id', "gene"], as_index=False).size()
+    cell_to_add = tx_to_reassign.groupby(by=['neighbor_by_centroid', "gene"], as_index=False).size()
+    cell_to_add.rename(columns={"neighbor_by_centroid": "cell_id"}, inplace=True)
+    
+    subtract_patch = pd.pivot(cell_to_remove, values="size", columns="gene", index='cell_id').fillna(0)
+    add_patch = pd.pivot(cell_to_add, values="size", columns="gene", index='cell_id').fillna(0)
+    
+    counts_to_subtract.update(subtract_patch)
+    counts_to_add.update(add_patch)
+    
+    tx_metadata[['cell_id_0']] = tx_metadata[['cell_id']]
+    tx_metadata.update(tx_to_reassign[['neighbor_by_centroid']].rename(columns={"neighbor_by_centroid": "cell_id"}))
 
-    counts_to_add = pd.DataFrame(1, index = removed_tx_ids, columns = ['count'])
-    counts_to_add['cell_id'] = removed_tx_new_cell_ids
-    counts_to_add['gene'] = removed_gene_ids
-    counts_to_add = counts_to_add.groupby(['cell_id','gene']).sum().reset_index()
-    counts_to_add = pd.pivot(counts_to_add, values = 'count', columns = 'gene', index = 'cell_id').fillna(0)
-
-    return counts_to_subtract, counts_to_add, intf_tx
+    return counts_to_subtract, counts_to_add, tx_metadata
 
 
 
