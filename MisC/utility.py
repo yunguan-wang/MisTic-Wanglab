@@ -4,6 +4,7 @@ import geopandas as gpd
 from geopandas import read_parquet
 import pandas as pd
 # Data manipulation 
+import re 
 import numpy as np
 from shapely import Point, Polygon, distance
 from scipy.spatial.distance import cdist
@@ -233,6 +234,24 @@ def annotate_tx_mask_distance(adata: sc.AnnData,
     intf_tx['celltype'] = adata.obs.loc[intf_tx.cell_id, cluster_col].values
     intf_tx['neighbor_celltype'] = adata.obs.loc[intf_tx.neighbor_by_centroid, cluster_col].values
     return intf_tx
+
+
+def extract_layer_num(layer: str) -> int:
+    """Extracts the layer number 
+
+    Parameters
+    ----------
+    layer : str
+        Name of the layer. It should be like counts_0, counts_1_proposed_update, etc
+
+    Returns
+    -------
+    int
+        The layer number
+    """
+    return int(re.findall(r'\d+', layer)[0])
+    
+
 
 
 ####################################

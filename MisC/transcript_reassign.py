@@ -8,15 +8,16 @@ from sklearn.mixture import GaussianMixture as GMM
 from sklearn.linear_model import LogisticRegression
 from scipy.stats import entropy
 # Utility functions 
-from utility import calculate_mask_distance, annotate_tx_mask_distance, mix_norm_cdf
+from utility import calculate_mask_distance, annotate_tx_mask_distance, mix_norm_cdf, extract_layer_num
 # Typing 
-from typing import Tuple, Union, Optional 
+from typing import Tuple, Optional 
 
 
 def propose_reassignment(adata: sc.AnnData, 
                          tx_metadata: gpd.GeoDataFrame,
                          cell_coords: gpd.GeoDataFrame,
                          layer: str, 
+                         mask_distance: pd.DataFrame, 
                          mask_dist_cutoff: float=1, 
                          tx_mask_d_max: float = 2.0,
                          hard_threshold: Optional[float]=None) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
@@ -32,6 +33,8 @@ def propose_reassignment(adata: sc.AnnData,
         The geodataframe recording the vertices of all the cells 
     layer : str
         The layer upon which the update is computed 
+    mask_distance: pd.DataFrame
+        A dataframe where each row is a pair of neighboring cells as well as their distance information 
     mask_dist_cutoff : float, optional
         The threshold of cell-cell distances beyond which a cell is no longer considered a neighbor, by default 1
     tx_mask_d_max : float, optional
@@ -44,8 +47,7 @@ def propose_reassignment(adata: sc.AnnData,
     Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]
         Updates to counts and transcript matrices 
     """
-    mask_distance  = calculate_mask_distance(adata=adata,
-                                             cell_coords=cell_coords)
+    
     intf_tx = annotate_tx_mask_distance(adata=adata,
                                         tx_metadata=tx_metadata,
                                         cell_coords=cell_coords,
@@ -111,10 +113,10 @@ def propose_reassignment(adata: sc.AnnData,
     counts_to_add.update(add_patch)
     
     # Finally, record which transcript should be assigned to which cell as well as its original assignment
-    tx_assignment_update = tx_to_reassign[['neighbor_by_centroid']].rename(columns={"neighbor_by_centroid": "cell_id"})
-    tx_assignment_original = tx_to_reassign[['cell_id']]
+    tx_assignment_addition = tx_to_reassign[['neighbor_by_centroid', "gene"]].rename(columns={"neighbor_by_centroid": "cell_id"})
+    tx_assignment_removal = tx_to_reassign[['cell_id', "gene"]]
 
-    return counts_to_subtract, counts_to_add, tx_assignment_update, tx_assignment_original
+    return counts_to_subtract, counts_to_add, tx_assignment_addition, tx_assignment_removal
 
 
 def test_proposed_reassignment(adata: sc.AnnData,
@@ -161,31 +163,58 @@ def test_proposed_reassignment(adata: sc.AnnData,
         contaminated_cell_ids = x_test_original.index[entropy_update['entropy'] >= entropy_original['entropy']]
         
         test_result[cell_type] = {"purer_cell_ids": purer_cell_ids,
-                                "contaminated_cell_ids": contaminated_cell_ids}
+                                  "contaminated_cell_ids": contaminated_cell_ids}
 
     return test_result
 
 
-def reassign_tx(adata: sc.AnnData,
-                layer: str,
-                counts_to_subtract: pd.DataFrame,
-                counts_to_add: pd.DataFrame,
-                tx_assignment_update: pd.DataFrame, 
-                tx_assignment_original: pd.DataFrame):
-    pass 
-     
-
-
-
-
-
-
-
-
-
-
-
+def make_reassignment(adata: sc.AnnData,
+                      layer: str,
+                      tx_metadata: gpd.GeoDataFrame,
+                      tx_assignment_addition: pd.DataFrame, 
+                      tx_assignment_removal: pd.DataFrame,
+                      test_result: dict):
     
+    tx_assignment_addition['accept'] = True
+    tx_assignment_removal['accept'] = True
+    for cell_type in test_result:
+        # Original is the one to be subtracted from   
+        tx_assignment_removal.loc[tx_assignment_removal.cell_id.isin(test_result[cell_type]['contaminated_cell_ids']),
+                                "accept"] = False
+
+        # Update is the one to be added on 
+        tx_assignment_addition.loc[tx_assignment_addition.cell_id.isin(test_result[cell_type]['contaminated_cell_ids']),
+                                "accept"] = False
+    
+    tx_assignment_addition = tx_assignment_addition[tx_assignment_addition['accept']]
+    tx_assignment_removal = tx_assignment_removal[tx_assignment_removal['accept']]
+    
+    tx_assignment_addition.drop(columns=['accept'], inplace=True)
+    tx_assignment_removal.drop(columns=['accept'], inplace=True)
+    
+    # Generate two patches for the count matrix 
+    counts_to_subtract = pd.DataFrame(0, index=adata.obs_names, columns=adata.var_names)
+    counts_to_add = pd.DataFrame(0, index=adata.obs_names, columns=adata.var_names)
+    # For removal, we for each cell count how many genes occured 
+    cell_to_remove = tx_assignment_removal.groupby(by=['cell_id', "gene"], as_index=False).size()
+    # For addition, we for each cell in the neighbor count how many genes occured 
+    cell_to_add = tx_assignment_addition.groupby(by=['cell_id', "gene"], as_index=False).size()
+    # Transform the dataframe from long to wide 
+    subtract_patch = pd.pivot(cell_to_remove, values="size", columns="gene", index='cell_id').fillna(0)
+    add_patch = pd.pivot(cell_to_add, values="size", columns="gene", index='cell_id').fillna(0)
+    # The update the find matching rows and columns 
+    counts_to_subtract.update(subtract_patch)
+    counts_to_add.update(add_patch)
+    
+    layer_num = extract_layer_num(layer)
+    # Update adata
+    adata.layers["counts_"+str(int(layer_num+1))] = adata.layers[layer]+counts_to_add-counts_to_subtract 
+    # Updata transcripts 
+    tx_metadata["cell_id_"+str(layer_num)] = tx_metadata['cell_id']
+    tx_metadata.update(tx_assignment_addition)
+    # No need to update boundary or metadata 
+    
+    return adata, tx_metadata
 
 
 
