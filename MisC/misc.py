@@ -4,7 +4,7 @@ import scanpy as sc
 import geopandas as gpd
 
 # Utility function 
-from utility import import_data, calculate_mask_distance
+from utility import import_data, calculate_mask_distance, extract_layer_num
 from transcript_reassign import propose_reassignment, test_proposed_reassignment, make_reassignment
 # Typing 
 from typing import Tuple, Union, Optional 
@@ -12,7 +12,7 @@ from typing import Tuple, Union, Optional
 
 
 class misc:
-    def __init__(self):
+    def __init__(self) -> None:
         self.adata = None
         self.cell_coords = None
         self.tx_metadata = None
@@ -31,7 +31,7 @@ class misc:
         self.mask_distance  = calculate_mask_distance(adata=self.adata,
                                                       cell_coords=self.cell_coords)
     
-    def _reassign_tx(self):
+    def _reassign_tx(self) -> None:
         counts_to_subtract, counts_to_add, tx_assignment_addition, tx_assignment_removal = propose_reassignment(adata=self.adata, 
                                                                                                                 tx_metadata=self.tx_metadata,
                                                                                                                 cell_coords=self.cell_coords,
@@ -47,8 +47,10 @@ class misc:
                                                          tx_assignment_addition=tx_assignment_addition,
                                                          tx_assignment_removal=tx_assignment_removal)
     
-    def reassign_tx(self, n_iter: int):
+    def reassign_tx(self, n_iter: int) -> None:
         for n in range(n_iter):
             self._reassign_tx()
+            layer_num = extract_layer_num(self.current_layer)
+            self.current_layer = "counts_"+str(int(layer_num+1))
             
     

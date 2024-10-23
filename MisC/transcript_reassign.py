@@ -122,9 +122,25 @@ def propose_reassignment(adata: sc.AnnData,
 def test_proposed_reassignment(adata: sc.AnnData,
                                layer: str,
                                counts_to_subtract: pd.DataFrame,
-                               counts_to_add: pd.DataFrame):
-    
-    
+                               counts_to_add: pd.DataFrame) -> dict:
+    """_summary_
+
+    Parameters
+    ----------
+    adata : sc.AnnData
+        _description_
+    layer : str
+        _description_
+    counts_to_subtract : pd.DataFrame
+        _description_
+    counts_to_add : pd.DataFrame
+        _description_
+
+    Returns
+    -------
+    _type_
+        _description_
+    """
     adata.layers[layer+"_proposed_update"] = adata.layers[layer]+counts_to_add-counts_to_subtract 
     index_w_updates = (counts_to_add.sum(axis=1)>0) | (counts_to_subtract.sum(axis=1)>0)
     index_wo_updates = (counts_to_add.sum(axis=1)==0) & (counts_to_subtract.sum(axis=1)==0)
@@ -173,8 +189,29 @@ def make_reassignment(adata: sc.AnnData,
                       tx_metadata: gpd.GeoDataFrame,
                       tx_assignment_addition: pd.DataFrame, 
                       tx_assignment_removal: pd.DataFrame,
-                      test_result: dict):
-    
+                      test_result: dict) -> Tuple[sc.AnnData, gpd.GeoDataFrame]:
+    """_summary_
+
+    Parameters
+    ----------
+    adata : sc.AnnData
+        _description_
+    layer : str
+        _description_
+    tx_metadata : gpd.GeoDataFrame
+        _description_
+    tx_assignment_addition : pd.DataFrame
+        _description_
+    tx_assignment_removal : pd.DataFrame
+        _description_
+    test_result : dict
+        _description_
+
+    Returns
+    -------
+    _type_
+        _description_
+    """
     tx_assignment_addition['accept'] = True
     tx_assignment_removal['accept'] = True
     for cell_type in test_result:
