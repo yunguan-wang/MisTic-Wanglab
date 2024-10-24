@@ -1,137 +1,299 @@
-import numpy as np
+# Data IO
+import h5py
+import os
+import sys
 import scanpy as sc
+import geopandas as gpd
 from geopandas import read_parquet
 import pandas as pd
-
+# Data manipulation 
+import re 
+import numpy as np
 from shapely import Point, Polygon, distance
+from scipy.spatial.distance import cdist
 from scipy.stats import norm
-from sklearn.mixture import GaussianMixture as GMM
-from typing import Optional
+# Typing 
+from typing import Optional, Union, Tuple
 
 
-def import_data(h5ad_path, 
-                detected_transcripts_path,
-                cell_metadata_path,
-                cell_by_gene_path,
-                cell_boundaries_path):
-    # Read annData
-    adata = sc.read_h5ad(h5ad_path)
-    # Read transcript data 
-    tx_metadata = pd.read_csv(detected_transcripts_path, index_col=0)
-    cell_meta = pd.read_csv(cell_metadata_path, index_col=0)
-    # cell by gene count matrix 
-    counts = pd.read_csv(cell_by_gene_path, index_col=0)
-    # Cell boundary
-    cell_coords = read_parquet(cell_boundaries_path)
-    # We filter out gene columns with "Blank"
-    blanks = [x for x in counts.columns if 'Blank' in x]
-    counts = counts.drop(blanks, axis=1)
-    # As cell ids are different in cell_meta and counts 
-    cell_id_mapping = pd.Series(
-        ['cell_' + str(x) for x in range(len(counts))],
-        index = counts.index,
-    )
-    counts.index = cell_id_mapping.loc[counts.index]
-    counts = counts.loc[adata.obs_names]
+def import_data(cell_by_gene_counts: Union[str, pd.DataFrame],
+                cell_metadata: Union[str, pd.DataFrame],
+                cell_boundary_polygons: Union[str, gpd.GeoDataFrame],
+                detected_transcripts: Union[str, pd.DataFrame]) -> Tuple[sc.AnnData, gpd.GeoDataFrame, gpd.GeoDataFrame]:
+    """Read in the four pieces information needed for subsequent analysis: 
+    cell-by-gene counts, cell metadata, cell boundary information, and transcript information. Some 
+    basic visualization and cell clustering will be performed. 
 
-    adata.layers['counts_0'] = counts.copy()
+    Parameters
+    ----------
+    cell_by_gene_counts : Union[str, pd.DataFrame]
+        Either the path to the csv file or a pandas dataframe containing the cell-by-gene count matrix whose first 
+        column is assumed to contain the ID for each cell while the rest of the columns should be the transcript counts
+        for each cell. 
+    cell_metadata : Union[str, pd.DataFrame]
+        Either the path to the csv file or a pandas dataframe containing the metadata for each cell whose 
+        first column is assumed to contain the ID for each cell. The information in the file/object should 
+        at least contain the xy coordinates of the centers of cells named center_x, and center_y, respectively.
+        If the users have already performed cell typing which is not required and will only be used for visualization,
+        the information can be stored here as a separate column: cell_type.
+    cell_boundary_polygons : Union[str, gpd.GeoDataFrame]
+        Either the path to the parquet file or the geopandas GeoDataFrame containing the vertex information 
+        for each cell. The first column is assumed to be the IDs for cells. It should contain one column 'Geometry'
+        that records the coordinates of the vertices.
+    detected_transcripts : Union[str, pd.DataFrame]
+        Either the path to the csv file or a pandas dataframe containing the information of the detected transcripts.
+        The first column is assumed to be some index. The information should contain the ID for a transcripte/molecule, 
+        the ID of the cell it belongs to, its xy coordinate named global_x, global_y respectively, and its gene information. 
 
-    cell_meta.index = cell_id_mapping[cell_meta.index]
-    cell_meta = cell_meta.loc[adata.obs_names]
-    tx_metadata = tx_metadata[tx_metadata.cell_id!=0]
-    tx_metadata = tx_metadata[~tx_metadata.gene.isin(blanks)]
-    tx_metadata.cell_id = cell_id_mapping[tx_metadata.cell_id].values
-    tx_metadata = tx_metadata[tx_metadata.cell_id.isin(adata.obs_names)]
-    tx_metadata['molecule_id'] = ['m' + str(i+1) for i in range(len(tx_metadata))]
+    Returns
+    -------
+    Tuple[sc.AnnData, gpd.GeoDataFrame, gpd.GeoDataFrame]
+        An AnnData object containing the original counts and some metainformation. The detected transcript as well as the polygons. 
+    """
+    
+    # Cell by gene counts matrix 
+    if isinstance(cell_by_gene_counts, str):
+        counts = pd.read_csv(cell_by_gene_counts, index_col=0)
+    else:
+        counts = cell_by_gene_counts
+    
+    # Cell metadata
+    if isinstance(cell_metadata, str):
+        cell_meta = pd.read_csv(cell_metadata, index_col=0)
+    else: 
+        cell_meta = cell_metadata
+    
+    # Polygons of cells 
+    if isinstance(cell_boundary_polygons, str):
+        cell_coords = read_parquet(cell_boundary_polygons)
+    else: 
+        cell_coords = cell_boundary_polygons
+    
+    # Transcript information 
+    # We also convert the pandas dataframe to geopandas geodataframe 
+    # by constructing points from the locations of each transcript
+    if isinstance(detected_transcripts, str):
+        tx_metadata = pd.read_csv(detected_transcripts, index_col=0)    
+    else:
+        tx_metadata = detected_transcripts
+    
+    tx_metadata = gpd.GeoDataFrame(tx_metadata, 
+                                   geometry=gpd.points_from_xy(tx_metadata.global_x, tx_metadata.global_y))
+    tx_metadata.rename_geometry("Geometry", inplace=True)
+    tx_metadata.set_index("molecule_id", inplace=True)
+    # Create AnnData object to store the counts 
+    # and facilitate future processing 
+    adata = sc.AnnData(counts)
     adata.obs['x'] = cell_meta.loc[adata.obs_names,'center_x']
     adata.obs['y'] = cell_meta.loc[adata.obs_names,'center_y']
-
-    metadata = adata.obs
-    entity_ids = metadata.index.values
-    cell_coords.EntityID = cell_id_mapping.loc[cell_coords.EntityID].values
-    cell_coords = cell_coords[cell_coords.EntityID.isin(entity_ids)]
-    cell_coords = cell_coords.drop_duplicates(subset=['EntityID','Geometry'])
-    cell_coords.index = cell_coords.EntityID
-
-    return adata, tx_metadata, cell_coords
+    if "cell_type" in cell_meta.columns:
+        adata.obs['cell_type'] = cell_meta.loc[adata.obs_names,'cell_type']
+    # As we will alter the counts later on, we will save a copy of the 
+    # original count in one of the layers 
+    adata.layers['counts_0'] = counts.copy()
+    # Then we perform basic normalization and transformation 
+    print("="*30)
+    print("Successfully read in data. Performing basic transformation")
+    sc.pp.normalize_total(adata, target_sum=1000)
+    sc.pp.log1p(adata)
+    # We also perform basic visualization 
+    print("UMAP")
+    sc.pp.neighbors(adata)
+    sc.tl.umap(adata)
+    # And we will use leiden to perform cell clustering 
+    print("Leiden")
+    sc.tl.leiden(adata, resolution=1)
+    print("Done~")
+    print("="*30)
+    return adata, cell_coords, tx_metadata
     
 
-def calculate_mask_distance(
-    centroid_dist: pd.DataFrame,
-    cell_coords: pd.DataFrame,
-    max_centroid_dist: int = 15,
-    min_centroid_dist: int = 0,
-    cluster_col:str = 'leiden',
-    x_col:str = 'x',
-    y_col:str = 'y',
-    geometry_col:str = 'Geometry',
-    re_cal_centroid_dist:bool = False
-    ):
-    '''
-    centroid_dist: cell by cell distance matrix by centroid location, 
-    max_centroid_dist: maximal distance to consider neighbors, 
-    max_centroid_dist: minimal distance to consider distant cells, 
-    cell_coords: cell by cell distance matrix by centroid location, 
-    centroid_dist: cell by cell distance matrix by centroid location, 
-    '''
+
+def calculate_mask_distance(adata: sc.AnnData,
+                            cell_coords: gpd.GeoDataFrame,
+                            max_centroid_dist: int=15,
+                            min_centroid_dist: int=0,
+                            cluster_col: str='leiden',
+                            geometry_col: str='Geometry',
+                            re_cal_centroid_dist: bool=False) -> pd.DataFrame:
+    """Calculate cell-cell distance based on their cell masks. The calculation is only done among 
+    neighboring cells of different types. 
+
+    Parameters
+    ----------
+    adata : sc.AnnData
+        The AnnData object containing cell metainformation
+    cell_coords : gpd.GeoDataFrame
+        The geodataframe recording the vertices of all the cells 
+    max_centroid_dist : int, optional
+        The threshold on cell-cell centroid distances beyond which we do not consider two cells being neighbors, by default 15
+    min_centroid_dist : int, optional
+        The threshold on cell-cell centroid distances under which we do not consider two cells being neighbors, by default 0
+    cluster_col : str, optional
+        Column name for cell clustering, by default 'leiden'
+    geometry_col : str, optional
+        Column name for the polygons, by default 'Geometry'
+    re_cal_centroid_dist : bool, optional
+        If centroid distances should be recorded, by default False
+
+    Returns
+    -------
+    pd.DataFrame
+        A dataframe where each row is a pair of neighboring cells as well as their distance information 
+    """
+    
+    # First, we compute cell-cell distance matrix based on their recorded centroids 
+    centroid_dist = cdist(adata.obs[['x','y']],adata.obs[['x','y']])
+    centroid_dist = pd.DataFrame(centroid_dist, index = adata.obs_names, columns=adata.obs_names)
+    # As computing mask distances between all pairs of cells would take too long
+    # we use the centroid distance to filter out the majority of the cells 
+    # We then create the adjacency matrix: 
+    # Any cell that is within in the specified threshold: max_centroid_dist is considered a neighbor
     adj = (centroid_dist > min_centroid_dist) & (centroid_dist<= max_centroid_dist)
-    adj = adj.agg(
-        lambda x: adj.columns[x.values].tolist(), axis=1)
+    # For each cell, we record its neighbors as a list
+    adj = adj.agg(lambda x: adj.columns[x.values].tolist(), axis=1)
     adj = pd.DataFrame(adj, columns = ['n'])
-    # pandas suggest using transform, but it did not work.
-    adj = adj.agg(
-        lambda x: [
-            y for y in x.n if cell_coords.loc[y, cluster_col]!=cell_coords.loc[x.name, cluster_col]
-            ], axis=1)
+    # We further exclude cells from the same cell cluster
+    # since we are only interested in comparing the transcript abundances among cells of different types 
+    adj = adj.agg(lambda x: [
+            y for y in x.n if adata.obs.loc[y, cluster_col]!=adata.obs.loc[x.name, cluster_col]], axis=1)
+    # We then exclude cells surrounded by cells of its own type 
     adj_nonself = adj[adj.apply(len)>0]
+    # Then we compute the cell-cell distance based on their masks
     adj_nonself_masks_ids = adj_nonself.explode()
     md = distance(
         cell_coords.loc[adj_nonself_masks_ids.index, geometry_col].values,
         cell_coords.loc[adj_nonself_masks_ids.values, geometry_col].values
     )
-    masks_distances = pd.DataFrame(
-        adj_nonself_masks_ids, columns=['neaghbor_by_centroid'])
-    masks_distances['mask_distance'] = md
+    mask_distance = pd.DataFrame(
+        adj_nonself_masks_ids, columns=['neighbor_by_centroid'])
+    mask_distance['mask_distance'] = md
+    mask_distance.reset_index(inplace=True)
     # recalculating the centroid distance is expansive, so it should be avoided
     if re_cal_centroid_dist:
-        v1 = cell_coords.loc[masks_distances.index, [x_col, y_col]].values
-        v2 = cell_coords.loc[masks_distances.neaghbor_by_centroid, [x_col, y_col]].values
-        masks_distances['centroid_distance'] = np.sum((v1-v2)**2, axis=1)**0.5
-    return masks_distances
+        v1 = adata.obs.loc[mask_distance.index, ['x','y']].values
+        v2 = adata.obs.loc[mask_distance.neighbor_by_centroid, ['x','y']].values
+        mask_distance['centroid_distance'] = np.sum((v1-v2)**2, axis=1)**0.5
+    return mask_distance
 
 
+def annotate_tx_mask_distance(adata: sc.AnnData,
+                                tx_metadata: gpd.GeoDataFrame,
+                                cell_coords: gpd.GeoDataFrame,
+                                mask_distance: pd.DataFrame, 
+                                mask_dist_cutoff: float=1, 
+                                x_col: str='global_x',
+                                y_col: str='global_y',
+                                cell_col: str='cell_id',
+                                gene_col: str='gene',
+                                cluster_col: str='leiden',
+                                geometry_col: str='Geometry') -> gpd.GeoDataFrame:
+    """Depending on the cell-cell distance computed based on cell masks, this function computes 
+    the distances of all the transcripts of a cell to all the neighboring cells 
 
-def process_counts(df: pd.DataFrame, target_sum = 200):
-    df = sc.AnnData(df)
-    sc.pp.normalize_total(df, target_sum=target_sum)
-    sc.pp.log1p(df)
-    return df.to_df()
+    Parameters
+    ----------
+    adata : sc.AnnData
+        The AnnData object containing cell metainformation
+    tx_metadata : gpd.GeoDataFrame
+        The detected transcripts
+    cell_coords : gpd.GeoDataFrame
+        The geodataframe recording the vertices of all the cells 
+    mask_distance : pd.DataFrame
+        The cell-cell distance based on cell masks 
+    mask_dist_cutoff : float, optional
+        The threshold of cell-cell distances beyond which a cell is no longer considered a neighbor, by default 1
+    x_col : str, optional
+        The column name for the x coordinate, by default 'global_x'
+    y_col : str, optional
+        The column name for the y coordinate, by default 'global_y'
+    cell_col : str, optional
+        The column name for cell id, by default 'cell_id'
+    gene_col : str, optional
+        The column name for gene names, by default 'gene'
+    cluster_col : str, optional
+        The column name for cell types, by default 'leiden'
+    geometry_col : str, optional
+        The column name for geometry, by default 'Geometry'
 
-
-def annotate_tx_mask_distance(
-        df, # df is return from calculate_mask_distance
-        tx_metadata,
-        cell_coords,
-        x_col = 'global_x',
-        y_col = 'global_y',
-        cell_col = 'cell_id',
-        gene_col = 'gene',
-        tx_col = 'molecule_id',
-        ):
-    df = df.copy()
-    intf_tx = tx_metadata[
-        tx_metadata.cell_id.isin(df.index)][[x_col,y_col,cell_col,gene_col,tx_col]]
-    intf_tx.columns = ['x','y','cell_id','gene','molecule_id']
-    intf_tx = intf_tx.merge(
-        df[['neaghbor_by_centroid','mask_distance']], left_on='cell_id', right_index=True
-        )
-    intf_tx['tx_geom'] = intf_tx[['x','y']].apply(lambda x: Point(x.iloc[0],x.iloc[1]),axis=1)
-    intf_tx['mask_geom'] = cell_coords.loc[
-        intf_tx.neaghbor_by_centroid.values, 'Geometry'].values
+    Returns
+    -------
+    gpd.GeoDataFrame
+        A dataframe containing the distances of all the transcripts to all the neighboring cells 
+    """
+    # Based on the cell-cell distance computed via cell masks 
+    # we find cells (interface cells) that are close to their neighbors (identified via cell centroids)
+    # Note that in computing the mask distance, we only included pairs 
+    # of cells that of different types 
+    interface = mask_distance[mask_distance.mask_distance<=mask_dist_cutoff]
+    # We extract transcripts of those interface cells 
+    intf_tx = tx_metadata[tx_metadata.cell_id.isin(interface.cell_id)][[x_col,y_col,cell_col,gene_col,geometry_col]]
+    intf_tx.columns = ['x','y','cell_id','gene','tx_geom']
+    intf_tx.reset_index(inplace=True)
+    # Then we compute the distance between transcript and cell mask of neighboring cell
+    intf_tx = intf_tx.merge(interface[['cell_id','neighbor_by_centroid','mask_distance']], on='cell_id')
+    intf_tx['mask_geom'] = cell_coords.loc[intf_tx.neighbor_by_centroid.values, geometry_col].values
     intf_tx['tx_mask_distance'] = distance(intf_tx['tx_geom'], intf_tx['mask_geom'])
-    intf_tx['celltype'] = cell_coords.loc[intf_tx.cell_id,'leiden'].values
-    intf_tx['neaby_celltype'] = cell_coords.loc[intf_tx.neaghbor_by_centroid,'leiden'].values
+    intf_tx['celltype'] = adata.obs.loc[intf_tx.cell_id, cluster_col].values
+    intf_tx['neighbor_celltype'] = adata.obs.loc[intf_tx.neighbor_by_centroid, cluster_col].values
     return intf_tx
+
+
+def extract_layer_num(layer: str) -> int:
+    """Extracts the layer number 
+
+    Parameters
+    ----------
+    layer : str
+        Name of the layer. It should be like counts_0, counts_1_proposed_update, etc
+
+    Returns
+    -------
+    int
+        The layer number
+    """
+    return int(re.findall(r'\d+', layer)[0])
+    
+
+def assemble_cell_coords(input_path: str,
+                         output_path: str) -> None:
+    """Assemble the file containing the polygons of cell masks
+
+    Parameters
+    ----------
+    input_path : str
+        The input folder
+    output_path : str
+        The output folder
+    """
+    boundries_fn = os.listdir(input_path + '/cell_boundaries')
+    for bfn in boundries_fn:
+        cell_coords = pd.Series()
+        bfn = os.path.join(input_path, 'cell_boundaries', bfn)
+        f = h5py.File(bfn,'r')
+        for cell in list(f['featuredata']):
+            coords = np.array((f['featuredata'][cell]['zIndex_0']['p_0']['coordinates'][0]))
+            if coords.shape[0] >= 5:  
+                cell_coords[cell] = coords
+        f.close()
+        cell_coords = cell_coords.to_frame(name='coord')
+        cell_coords['X'] = cell_coords.coord.apply(lambda x: '_'.join(x[:,0].round(2).astype(str)))
+        cell_coords['Y'] = cell_coords.coord.apply(lambda x: '_'.join(x[:,1].round(2).astype(str)))
+        if os.path.exists(os.path.join(output_path, 'cell_coords.csv')):
+            cell_coords.iloc[:,1:].to_csv(output_path + '/cell_coords.csv', mode='a', header=False)
+        else:
+            cell_coords.iloc[:,1:].to_csv(output_path + '/cell_coords.csv') 
+
+
+####################################
+# Wait till future updates
+def mix_norm_cdf(x, model):
+    weights, means, covars = model.weights_, model.means_.reshape(-1), model.covariances_.reshape(-1)
+    mcdf = 0.0
+    for i in range(len(weights)):
+        mcdf += weights[i] * norm.cdf(x, loc=means[i], scale=np.sqrt(covars[i]))
+    return mcdf
+
 
 
 def random_downsample(counts: pd.DataFrame, cells: list , n_remove:int = 5):
@@ -147,85 +309,6 @@ def random_downsample(counts: pd.DataFrame, cells: list , n_remove:int = 5):
                 break
         cell_counts.loc[c, remove] -= remove_counts
     return cell_counts
-
-def mix_norm_cdf(x, model):
-    weights, means, covars = model.weights_, model.means_.reshape(-1), model.covariances_.reshape(-1)
-    mcdf = 0.0
-    for i in range(len(weights)):
-        mcdf += weights[i] * norm.cdf(x, loc=means[i], scale=np.sqrt(covars[i]))
-    return mcdf
-
-
-def remove_tx(
-        counts: pd.DataFrame, 
-        cell_coords: pd.DataFrame, 
-        intf_tx: pd.DataFrame, # returned by annotate_tx_mask_distance
-        tx_mask_d_max: float = 2.0,
-        hard_threshold: Optional[float]=None):
-
-    intf_tx = intf_tx.copy()
-    s_total = counts.groupby(cell_coords.leiden).count()
-    s_above_0 = (counts>0).groupby(cell_coords.leiden).sum()
-    percent_pos = s_above_0 / s_total
-
-    intf_tx = intf_tx[intf_tx.tx_mask_distance<tx_mask_d_max].sort_values('tx_mask_distance')
-    intf_tx['pct_exp_celltype'] = intf_tx.apply(
-        lambda x: percent_pos.loc[x['celltype'],x['gene']], axis=1).values
-    intf_tx['pct_exp_nearby'] = intf_tx.apply(
-        lambda x: percent_pos.loc[x['neaby_celltype'],x['gene']], axis=1).values
-    intf_tx['pct_diff'] = intf_tx.pct_exp_nearby - intf_tx.pct_exp_celltype
-    
-    if hard_threshold is None:
-        gmm_dict = {}
-        for cell_type0 in percent_pos.index:
-            for cell_type1 in percent_pos.index:
-                if cell_type0 == cell_type1:
-                    continue
-                # 0 vs other (if > 0 then gene expressed)
-                # only consider > 0
-                fold_change = np.log2(percent_pos.loc[cell_type0,:]+1) - np.log2(percent_pos.loc[cell_type1, :]+1)
-                model = GMM(2)
-                model.fit(fold_change.values.reshape((-1,1)))
-                gmm_dict["{}-{}".format(cell_type0, cell_type1)] = model
-        intf_tx['remove_prob'] = intf_tx.apply(lambda x: mix_norm_cdf(x['pct_diff'],
-                                                gmm_dict["{}-{}".format(x['celltype'], x['neaby_celltype'])]), axis=1).values
-
-        intf_tx['remove'] = np.random.binomial(1, intf_tx['remove_prob'])
-    else:
-        intf_tx['remove'] = (intf_tx['pct_diff']>=hard_threshold).astype(int)
-    
-    c_g_remove = intf_tx[intf_tx['remove']==1]
-    # c_g_remove = intf_tx[intf_tx['pct_diff']>=0.25]
-    c_g_remove = c_g_remove.groupby(c_g_remove.molecule_id).first()
-    cells = c_g_remove.cell_id.unique()
-    counts_to_subtract = counts.loc[cells,:].copy()
-    removed_tx_ids = []
-    removed_tx_new_cell_ids = []
-    removed_gene_ids = []
-    for c in cells:
-        # Remove Tx from c
-        removed_genes = c_g_remove.loc[c_g_remove.cell_id==c].gene.tolist()
-        removed_gene_ids += removed_genes # actual gene names for reassigned transcripts
-        removed_genes, remove_counts = np.unique(removed_genes, return_counts=True)
-        counts_to_subtract.loc[c, removed_genes] -= remove_counts
-        # Add Tx to c's neighbor
-        removed_tx_ids += c_g_remove.loc[c_g_remove.cell_id==c].molecule_id.tolist() # get the transcripts that were reassigned
-        removed_tx_new_cell_ids += c_g_remove.loc[c_g_remove.cell_id==c].neaghbor_by_centroid.tolist() # get the cell ids that each transcript were reassigned to
-
-    counts_to_add = pd.DataFrame(1, index = removed_tx_ids, columns = ['count'])
-    counts_to_add['cell_id'] = removed_tx_new_cell_ids
-    counts_to_add['gene'] = removed_gene_ids
-    counts_to_add = counts_to_add.groupby(['cell_id','gene']).sum().reset_index()
-    counts_to_add = pd.pivot(counts_to_add, values = 'count', columns = 'gene', index = 'cell_id').fillna(0)
-
-    return counts_to_subtract, counts_to_add, intf_tx
-
-
-
-
-
-
-
 
 
     
