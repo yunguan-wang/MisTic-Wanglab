@@ -10,6 +10,7 @@ from shapely import Point, Polygon, distance
 from scipy.spatial.distance import cdist
 import matplotlib.pyplot as plt
 import seaborn as sns
+import adjustText
 # %matplotlib inline
 #%%
 def plot_patch(
@@ -111,6 +112,7 @@ counts = pd.read_csv('cell_by_gene.csv', index_col=0)
 blanks = [x for x in counts.columns if x[:5] == 'Blank']
 counts = counts.drop(blanks, axis=1)
 counts.index = ['cell_' + str(x+1) for x in counts.index]
+counts = counts.loc[spacia_meta.index]
 # Construct shapely Polygon object from scratch.
 cell_masks = pd.read_csv('cell_coords.csv', index_col=0) # Cell masks were extracted from individual files from VizGen
 cell_masks.index = ['cell_' + str(x+1) for x in cell_masks.index]
@@ -125,7 +127,14 @@ GeoDataFrame(
     cell_masks[['polygon']],geometry='polygon'
     ).to_parquet('cell_polygons.parquet', index=True)
 #%%
+spacia_meta = pd.read_csv('hcc1_spacia_meta.txt', sep='\t', index_col=0)
+counts = pd.read_csv('cell_by_gene.csv', index_col=0)
+blanks = [x for x in counts.columns if x[:5] == 'Blank']
+counts = counts.drop(blanks, axis=1)
+counts.index = ['cell_' + str(x+1) for x in counts.index]
 counts = counts.loc[spacia_meta.index]
+tx_meta = pd.read_csv('transcript_meta.csv', index_col=0)
+cell_masks = read_parquet('cell_polygons.parquet')
 adata = sc.AnnData(counts)
 adata.obs = spacia_meta
 adata.layers['Raw'] = adata.X.copy() # Save raw counts for later
@@ -143,7 +152,7 @@ adata.layers['Raw'] = adata.X.copy() # Save raw counts for later
 # %%
 ## Cannot work on the full dataset due to memory size issue
 ## See if you can do it on the full dataset, otherwise run this in blocks just to get the cell-cell mask distance
-adata_uq = adata[(adata.obs.X<=6000) & ((adata.obs.Y>=6000))] # subsetted upper quadrant
+adata_uq = adata[(adata.obs.X<=6000) & ((adata.obs.Y>=6000))].copy() # subsetted upper quadrant
 plot_patch(adata, x_col='X', y_col='Y', color_col=['cell_type'])
 cell_dist = cdist(
     adata_uq[adata_uq.obs.cell_type=='Tumor_cells'].obs[['X','Y']],
@@ -179,6 +188,7 @@ non_tumor_samples = adata_uq[
     adata_uq.obs.cell_type!='Tumor_cells'].to_df().sample(len(interface_tumor)).index
 sample_celltypes = adata_uq.obs.loc[non_tumor_samples,'cell_type'].astype(str).values
 # Constract the interface adata with swapped cells
+# The interace cells will have the same cell id but swapped gene expression.
 adata_interface = adata_uq[interface_tumor].copy()
 adata_interface.X = adata_uq[non_tumor_samples].layers['Raw']
 adata_interface.layers['Raw'] = adata_interface.X.copy()
@@ -216,11 +226,18 @@ interface_synthetic = mask_distance_synthetic[
 
 interface_synthetic['tumor_cell'] = interface_synthetic.index
 interface_synthetic = interface_synthetic.sort_values('mask_distance')
+# only simulated TX from one neighbor. 
+# TXs from another neighbor is conceptually equivalent and computationally a simple reapeat.
 interface_synthetic.drop_duplicates('tumor_cell', inplace=True)
 n_points = 200
+# doublet level means the fraction of cell in the interaface to have at least one added TX
+doublet_level = 0.4
+max_noise_tx = 10
 simulated_points = {}
 manipulated_cells = []
 for tumor_cell in interface_synthetic.index:
+    if np.random.uniform(0,1,1)[0]>doublet_level:
+        continue
     neighbor = interface_synthetic.loc[tumor_cell,'neaghbor_by_centroid']
     tumor_p = cell_meta_synthetic.loc[tumor_cell,'polygon']
     neighbor_p = cell_meta_synthetic.loc[neighbor,'polygon']
@@ -228,15 +245,10 @@ for tumor_cell in interface_synthetic.index:
     dist_to_neighbor = distance(
         points.geoms, np.repeat(neighbor_p,n_points)
     )
-    valid_points = np.array(points.geoms)[dist_to_neighbor<2][:5].tolist()
+    valid_points = np.array(points.geoms)[dist_to_neighbor<2][:np.random.randint(1,max_noise_tx)].tolist()
     if len(valid_points)==0:
         continue
     simulated_points[tumor_cell]= valid_points
-    # plt.plot(*tumor_p.exterior.xy)
-    # plt.plot(*neighbor_p.exterior.xy)
-    # for point in valid_points:
-    #     plt.scatter(*point.xy)
-
 #%%
 # Differential analysis
 sc.pp.normalize_total(adata, target_sum=1000)
@@ -246,16 +258,15 @@ deg = sc.get.rank_genes_groups_df(adata, None)
 deg = deg.merge(deg[deg.group=='Tumor_cells'][['names', 'pct_nz_group']],on='names')
 # Filter the deg that can be added to synthetic target cells
 deg = deg[
-    (deg.pvals_adj<=0.01) & 
+    (deg.pvals_adj<=0.05) & 
     (deg.logfoldchanges>=0.6) &
     # Here I limit to genes not highly expressed in tumor cells, because some of these cells
     # could still be contaminated by other cells   
-    (deg.pct_nz_group_y<=0.25) & 
+    (deg.pct_nz_group_y <= 0.2) & 
     ((deg.pct_nz_group_x - deg.pct_nz_reference)>=0.2)
 ]
 ct_deg = deg.groupby('group').names.agg(lambda x : x.tolist())
 # Randomly assign gene symbol for each simulated transcript
-pd.DataFrame.from_dict(simulated_points,orient='index').stack().reset_index()
 interface_synthetic['neighbor_ct'] = cell_meta_synthetic.loc[
     interface_synthetic.neaghbor_by_centroid.values, 'cell_type'].values
 interface_synthetic.loc[simulated_points.keys(),'synthetic_tx'] = pd.Series(
@@ -274,8 +285,8 @@ synthetic_txs['num'] = 1
 count_delta = synthetic_txs.groupby(['cell','gene']).num.count()
 count_delta = count_delta.reset_index().pivot(
     columns='gene', values='num', index='cell').fillna(0).astype(int)
-# Update count matrix in synthetic adata
 
+# Update count matrix in synthetic adata
 synthetic_counts = adata_synthetic.to_df()
 synthetic_counts.loc[count_delta.index, count_delta.columns] += count_delta.values
 adata_synthetic.X = synthetic_counts.values
@@ -293,22 +304,33 @@ print(
         count_delta.index, 
         np.random.choice(adata_synthetic.to_df().columns, count_delta.shape[1])
         ].sum().sum())
-
 #%%
-# adata.X = adata.layers['Raw']
-# adata.obs['synthetic_target'] = 'N'
-# adata.obs.loc[simulated_points.keys(), 'synthetic_target'] = 'Y'
-# sc.pp.neighbors(adata)
-# sc.tl.umap(adata)
-# sc.pl.pca(adata, color=['synthetic_target', 'cell_type'])
-
-# #%%
-# plot_patch(adata_orphan, x_col='X', y_col='Y', color_col=['cell_type'], center=(4000,8500))
-# plot_patch(adata_uq, x_col='X', y_col='Y', color_col=['cell_type'], center=(4000,8500))
-# # %%
-# plot_boundaries(cell_meta.loc[adata_uq.obs_names],bbox=(4500,8600, 500,500))
-# plot_boundaries(cell_meta.loc[adata_orphan.obs_names],bbox=(4500,8600, 500,500))
-# # %%
-# plot_boundaries(cell_meta.loc[adata_uq.obs_names],bbox=(4500,8600, 500,500))
-# plot_boundaries(cell_meta_synthetic.loc[adata_uq.obs_names],bbox=(4500,8600, 500,500))
-# plot_boundaries(cell_meta_synthetic.loc[interface_tumor],bbox=(4500,8600, 500,500))
+tx_meta_interface = tx_meta[tx_meta.cell.isin(interface_synthetic.index)].copy()
+tx_meta_interface['tx_type'] = 'real'
+synthetic_tx_meta = synthetic_txs.copy().iloc[:,:-1]
+synthetic_tx_meta.columns = ['point', 'gene', 'cell']
+synthetic_tx_meta['tx_type'] = 'synthetic'
+tx_meta_interface = pd.concat([tx_meta_interface, synthetic_tx_meta])
+tx_meta_interface = tx_meta_interface.dropna(axis=1)
+synthetic_counts.to_csv('synthetic_counts_with_doublets.csv')
+synthetic_tx_meta.to_csv('synthetic_counts_tx_metadata.csv')
+#%%
+# test plotting for debug purposes
+for cell in tx_meta_interface[tx_meta_interface.tx_type=='synthetic'].cell.value_counts().index[:5]:
+    _ = plt.figure()
+    cell_tx = tx_meta_interface[tx_meta_interface.cell==cell]
+    cell_poly = cell_masks.loc[cell,'polygon']
+    xs, ys = cell_poly.exterior.xy
+    plt.fill(xs, ys, alpha=0.5, fc='b', ec='none')
+    texts = []
+    for g, row in cell_tx.iterrows():
+        added_genes = cell_tx[cell_tx.tx_type!='real'].gene.unique()
+        try:
+            x, y = [float(i) for i in row['point'].split('(')[1][:-1].split(' ')]
+        except:
+            x, y = np.array(row['point'].xy).flatten()
+        plt.scatter(x, y, c= 'k' if row['tx_type'] == 'real' else 'r')
+        if row.gene in added_genes:
+            texts.append(plt.text(x, y, row.gene, c='m'))
+    adjustText.adjust_text(texts)
+# %%
