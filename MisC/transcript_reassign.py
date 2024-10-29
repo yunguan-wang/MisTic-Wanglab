@@ -8,7 +8,7 @@ from sklearn.mixture import GaussianMixture as GMM
 from sklearn.linear_model import LogisticRegression
 from scipy.stats import entropy
 # Utility functions 
-from utility import calculate_mask_distance, annotate_tx_mask_distance, mix_norm_cdf, extract_layer_num
+from utility import annotate_tx_mask_distance, mix_norm_cdf, extract_layer_num
 # Typing 
 from typing import Tuple, Optional 
 
@@ -45,7 +45,11 @@ def propose_reassignment(adata: sc.AnnData,
     Returns
     -------
     Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]
-        Updates to counts and transcript matrices 
+        Updates to counts and transcript matrices. The first two dataframes are "patches" to the current 
+        count matrix. The first one is the number of transcripts that should be subtracted from the count while 
+        the second one is the number of transcripts to be added to the count. 
+        The last two dataframes are "patches" for actual transcript reassignment. The first one shows which 
+        transcript should be reassigned to which cell type while the second one records the original assignment.  
     """
     
     intf_tx = annotate_tx_mask_distance(adata=adata,
@@ -123,24 +127,25 @@ def test_proposed_reassignment(adata: sc.AnnData,
                                layer: str,
                                counts_to_subtract: pd.DataFrame,
                                counts_to_add: pd.DataFrame) -> dict:
-    """_summary_
+    """Given the two "patches", this function tests which portion of the patches should be accepted 
 
     Parameters
     ----------
     adata : sc.AnnData
-        _description_
+        The AnnData object containing cell metainformation
     layer : str
-        _description_
+        The layer upon which the update is computed 
     counts_to_subtract : pd.DataFrame
-        _description_
+        The number of transcripts that should be subtracted from the count
     counts_to_add : pd.DataFrame
-        _description_
+        The number of transcripts that should be subtracted from the count
 
     Returns
     -------
-    _type_
-        _description_
+    dict
+        A dictionary recording for each cell type the ids of cells that become purer and those that become contaminated 
     """
+    # We first tentatively accept the changes and record which cells have updates and which have not 
     adata.layers[layer+"_proposed_update"] = adata.layers[layer]+counts_to_add-counts_to_subtract 
     index_w_updates = (counts_to_add.sum(axis=1)>0) | (counts_to_subtract.sum(axis=1)>0)
     index_wo_updates = (counts_to_add.sum(axis=1)==0) & (counts_to_subtract.sum(axis=1)==0)
@@ -148,22 +153,25 @@ def test_proposed_reassignment(adata: sc.AnnData,
     cell_types = np.unique(adata.obs['leiden'])
     test_result = {cell_type: {} for cell_type in cell_types}
     for cell_type in cell_types:
+        # For each cell type, we will perform a one-vs-other binary classification 
+        # in cells without updates 
         index_other_type = (adata.obs['leiden'] != cell_type) & index_wo_updates
         index_other_type = index_other_type[index_other_type].index
-        
+        # Extract the counts and the cell labels and rename types that are not cell_type to other 
         x_train = adata.to_df(layer).loc[index_wo_updates, :]
         y_train = adata.obs.loc[index_wo_updates, ['leiden']].astype(str)
         y_train.loc[index_other_type, "leiden"] = "other"
         classifier = LogisticRegression(max_iter=10000, class_weight='balanced')
         classifier.fit(x_train, y_train['leiden'].values)
-        
+        # Use the fitted model to compute the probability of cells of the same cell type 
+        # but have updates 
         index_cell_type = (adata.obs['leiden'] == cell_type) & index_w_updates
         x_test_original = adata.to_df(layer).loc[index_cell_type, :]
         x_test_update = adata.to_df(layer+"_proposed_update").loc[index_cell_type, :]
         
         prediction_original = classifier.predict_proba(x_test_original)
         prediction_udpate = classifier.predict_proba(x_test_update)
-        
+        # We use entropy to measure the purity 
         entropy_original = pd.DataFrame(
             entropy(prediction_original, axis=1),
             columns=['entropy'],
@@ -174,7 +182,7 @@ def test_proposed_reassignment(adata: sc.AnnData,
             columns=['entropy'],
             index=x_test_update.index
         )
-        
+        # Those with decreased entropies are purer otherwise they are contaminated 
         purer_cell_ids = x_test_original.index[entropy_update['entropy'] < entropy_original['entropy']]
         contaminated_cell_ids = x_test_original.index[entropy_update['entropy'] >= entropy_original['entropy']]
         
@@ -190,36 +198,36 @@ def make_reassignment(adata: sc.AnnData,
                       tx_assignment_addition: pd.DataFrame, 
                       tx_assignment_removal: pd.DataFrame,
                       test_result: dict) -> Tuple[sc.AnnData, gpd.GeoDataFrame]:
-    """_summary_
+    """Given the testing results, this function makes the actual reassignment and adjustment 
 
     Parameters
     ----------
     adata : sc.AnnData
-        _description_
+        The AnnData object containing cell metainformation
     layer : str
-        _description_
+        The layer upon which the update is computed 
     tx_metadata : gpd.GeoDataFrame
-        _description_
+        The detected transcripts
     tx_assignment_addition : pd.DataFrame
-        _description_
+        Transcripts that should be reassigned to which cell type
     tx_assignment_removal : pd.DataFrame
-        _description_
+        The original assignment
     test_result : dict
-        _description_
+        A dictionary of the testing results 
 
     Returns
     -------
-    _type_
-        _description_
+    Tuple[sc.AnnData, gpd.GeoDataFrame]
+        The adjusted adata and tx_metadata 
     """
     tx_assignment_addition['accept'] = True
     tx_assignment_removal['accept'] = True
     for cell_type in test_result:
-        # Original is the one to be subtracted from   
+        # Removal is the one to be subtracted from   
         tx_assignment_removal.loc[tx_assignment_removal.cell_id.isin(test_result[cell_type]['contaminated_cell_ids']),
                                 "accept"] = False
 
-        # Update is the one to be added on 
+        # Addition is the one to be added on 
         tx_assignment_addition.loc[tx_assignment_addition.cell_id.isin(test_result[cell_type]['contaminated_cell_ids']),
                                 "accept"] = False
     
