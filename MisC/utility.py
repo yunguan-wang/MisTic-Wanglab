@@ -9,6 +9,7 @@ import numpy as np
 from shapely import Point, Polygon, distance
 from scipy.spatial.distance import cdist
 from scipy.stats import norm
+from itertools import combinations
 # Typing 
 from typing import Optional, Union, Tuple
 
@@ -251,6 +252,31 @@ def extract_layer_num(layer: str) -> int:
     """
     return int(re.findall(r'\d+', layer)[0])
     
+
+def mask_eval(l: list) -> Tuple[bool, list]:
+    """Given a list of coordinates, check if it contains only on polygon
+
+    Parameters
+    ----------
+    l : list
+        List of potentially vertices of different polygons
+
+    Returns
+    -------
+    Tuple[bool, list]
+        If the list defines only one polygon, and the coordinates of its vertices 
+    """
+    unique_l = []
+    for a,b in combinations(l,2):
+        if (len(unique_l) ==0) or (a not in np.array(unique_l)):
+            unique_l.append(a)
+        if np.array_equal(a, b):
+            continue
+        else:
+            if b not in np.array(unique_l):
+                unique_l.append(b)
+    return len(unique_l) > 1, unique_l
+
 
 ####################################
 # Wait till future updates

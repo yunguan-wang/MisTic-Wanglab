@@ -5,9 +5,11 @@ import pandas as pd
 import scanpy as sc
 import geopandas as gpd
 # Data manipulation 
-import numpy as np 
+import numpy as np
+from geopandas import GeoDataFrame  
+from shapely import Polygon
 # Utility function 
-from utility import import_data, calculate_mask_distance, extract_layer_num
+from utility import import_data, calculate_mask_distance, extract_layer_num, mask_eval
 from transcript_reassign import propose_reassignment, test_proposed_reassignment, make_reassignment
 # Typing 
 from typing import Tuple, Union, Optional 
@@ -56,7 +58,9 @@ class misc:
             self._reassign_tx()
             layer_num = extract_layer_num(self.current_layer)
             self.current_layer = "counts_"+str(int(layer_num+1))
-            
+    
+    ###########
+    # Do not run just copied and pasted        
     @classmethod 
     def assemble_cell_coords(cls, 
                              input_path: str,
@@ -73,21 +77,41 @@ class misc:
         boundries_fn = os.listdir(input_path + '/cell_boundaries')
         for bfn in boundries_fn:
             cell_coords = pd.Series()
+            # print(bfn)
             bfn = os.path.join(input_path, 'cell_boundaries', bfn)
             f = h5py.File(bfn,'r')
+            diff_coords = []
             for cell in list(f['featuredata']):
-                coords = np.array((f['featuredata'][cell]['zIndex_0']['p_0']['coordinates'][0]))
-                if coords.shape[0] >= 5:  
-                    cell_coords[cell] = coords
+                coords = []
+                for i in range(7):
+                    tmp = np.array((f['featuredata'][cell]['zIndex_'+str(i)]['p_0']['coordinates'][0]))
+                    coords.append(tmp)
+                non_unique, unique_v = mask_eval(coords)
+                if non_unique:
+                    print(cell)
+                else: 
+                    cell_coords[cell] = unique_v
+            print(bfn)
             f.close()
             cell_coords = cell_coords.to_frame(name='coord')
-            cell_coords['X'] = cell_coords.coord.apply(lambda x: '_'.join(x[:,0].round(2).astype(str)))
-            cell_coords['Y'] = cell_coords.coord.apply(lambda x: '_'.join(x[:,1].round(2).astype(str)))
-            if os.path.exists(os.path.join(output_path, 'cell_coords.csv')):
-                cell_coords.iloc[:,1:].to_csv(output_path + '/cell_coords.csv', mode='a', header=False)
+            cell_coords['X'] = cell_coords.coord.apply(lambda x: '_'.join(x[0][:,0].round(2).astype(str)))
+            cell_coords['Y'] = cell_coords.coord.apply(lambda x: '_'.join(x[0][:,1].round(2).astype(str)))
+            if os.path.exists(os.path.join(input_path, 'cell_coords.csv')):
+                cell_coords.iloc[:,1:].to_csv(input_path + '/cell_coords.csv', mode='a', header=False)
             else:
-                cell_coords.iloc[:,1:].to_csv(output_path + '/cell_coords.csv')  
-        # csv to parquet code here 
+                    cell_coords.iloc[:,1:].to_csv(input_path + '/cell_coords.csv')
+        
+        cell_masks.index = ['cell_' + str(x+1) for x in cell_masks.index]
+        cell_masks = cell_masks.loc[spacia_meta.index]
+        cell_masks['n_polygon'] = cell_masks.X.apply(lambda x: len(x.split('_')))
+        cell_masks.X = cell_masks.X.str.split('_')
+        cell_masks.Y = cell_masks.Y.str.split('_')
+        cell_masks['polygon'] = cell_masks.apply(
+            lambda x: Polygon([(x.X[i], x.Y[i]) for i in range(x.n_polygon)]), axis=1)
+        # Save as geopandas parquet file
+        GeoDataFrame(
+            cell_masks[['polygon']],geometry='polygon'
+            ).to_parquet('cell_polygons.parquet', index=True)
         
     @classmethod 
     def foo(cls):
