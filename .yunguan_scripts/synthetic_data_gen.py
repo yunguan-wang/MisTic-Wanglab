@@ -1,6 +1,6 @@
 #%%
 import os
-from geopandas import read_parquet, GeoDataFrame, GeoSeries
+from geopandas import read_parquet, GeoDataFrame, GeoSeries,points_from_xy
 import shapely
 import numpy as np
 import scanpy as sc
@@ -234,7 +234,8 @@ n_points = 200
 doublet_level = 0.4
 max_noise_tx = 10
 simulated_points = {}
-manipulated_cells = []
+# manipulated_cells = []
+neighbors = []
 for tumor_cell in interface_synthetic.index:
     if np.random.uniform(0,1,1)[0]>doublet_level:
         continue
@@ -249,6 +250,7 @@ for tumor_cell in interface_synthetic.index:
     if len(valid_points)==0:
         continue
     simulated_points[tumor_cell]= valid_points
+    neighbors += [neighbor] * len(valid_points)
 #%%
 # Differential analysis
 sc.pp.normalize_total(adata, target_sum=1000)
@@ -282,6 +284,7 @@ synthetic_txs = pd.DataFrame(
 synthetic_txs['gene'] = interface_synthetic.tx_symbol.explode()
 synthetic_txs['cell'] = synthetic_txs.index
 synthetic_txs['num'] = 1
+synthetic_txs['nearest_neighbor'] = neighbors
 count_delta = synthetic_txs.groupby(['cell','gene']).num.count()
 count_delta = count_delta.reset_index().pivot(
     columns='gene', values='num', index='cell').fillna(0).astype(int)
@@ -307,19 +310,21 @@ print(
 #%%
 tx_meta_interface = tx_meta[tx_meta.cell.isin(interface_synthetic.index)].copy()
 tx_meta_interface['tx_type'] = 'real'
-tx_meta_interface['point'] = tx_meta_interface.apply(
-    lambda x: Point(x.global_x, x.global_y), axis=1
-)
-synthetic_tx_meta = synthetic_txs.copy().iloc[:,:-1]
-synthetic_tx_meta.columns = ['point', 'gene', 'cell']
+tx_meta_interface['point'] = points_from_xy(tx_meta_interface.global_x,tx_meta_interface.global_y)
+tx_meta_interface.rename({'cell':'cell_id'}, inplace=True, axis=1)
+synthetic_tx_meta = synthetic_txs.copy().drop('num',axis=1)
+synthetic_tx_meta.columns = ['point', 'gene', 'cell_id','neighbor']
 synthetic_tx_meta['tx_type'] = 'synthetic'
+synthetic_tx_meta.index = ['tx_s_' + str(i+1) for i in range(synthetic_tx_meta.shape[0])]
 tx_meta_interface = pd.concat([tx_meta_interface, synthetic_tx_meta])
 tx_meta_interface = GeoDataFrame(tx_meta_interface, geometry='point')
-tx_meta_interface = tx_meta_interface.dropna(axis=1)
-synthetic_counts.to_csv('synthetic_counts_with_doublets.csv')
+keep = ['gene', 'point', 'cell_id', 'tx_type', 'x', 'y','neighbor']
+tx_meta_interface = tx_meta_interface[keep]
 tx_meta_interface['x'] = tx_meta_interface.point.apply(lambda x: np.array(x.xy).flatten()[0])
 tx_meta_interface['y'] = tx_meta_interface.point.apply(lambda x: np.array(x.xy).flatten()[1])
+synthetic_counts.to_csv('synthetic_counts_with_doublets.csv')
 tx_meta_interface.to_parquet('synthetic_counts_tx_metadata.parquet', index=True)
+cell_meta_synthetic.loc[synthetic_counts.index].to_csv('synthetic_counts_with_doublets_metadata.csv')
 #%%
 # test plotting for debug purposes
 # for cell in tx_meta_interface[tx_meta_interface.tx_type=='synthetic'].cell.value_counts().index[:5]:
