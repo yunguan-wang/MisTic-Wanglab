@@ -1,4 +1,5 @@
 # Data IO 
+from tqdm import tqdm
 import pandas as pd
 import scanpy as sc
 import geopandas as gpd
@@ -51,7 +52,8 @@ def propose_reassignment(adata: sc.AnnData,
         The last two dataframes are "patches" for actual transcript reassignment. The first one shows which 
         transcript should be reassigned to which cell type while the second one records the original assignment.  
     """
-    
+    #TODO: Add a progress bar
+    print('Identifying transcripts that need to be reassigned...')
     intf_tx = annotate_tx_mask_distance(adata=adata,
                                         tx_metadata=tx_metadata,
                                         cell_coords=cell_coords,
@@ -70,7 +72,7 @@ def propose_reassignment(adata: sc.AnnData,
     intf_tx = intf_tx[intf_tx.tx_mask_distance<tx_mask_d_max].sort_values('tx_mask_distance')
     # Then we compute the differences in the percentages 
     intf_tx['pct_exp_celltype'] = intf_tx.apply(
-        lambda x: percent_pos.loc[x['celltype'],x['gene']], axis=1).values
+        lambda x: percent_pos.loc[x['cell_type'],x['gene']], axis=1).values
     intf_tx['pct_exp_nearby'] = intf_tx.apply(
         lambda x: percent_pos.loc[x['neighbor_celltype'],x['gene']], axis=1).values
     intf_tx['pct_diff'] = intf_tx.pct_exp_nearby - intf_tx.pct_exp_celltype
@@ -90,7 +92,7 @@ def propose_reassignment(adata: sc.AnnData,
                 model.fit(fold_change.values.reshape((-1,1)))
                 gmm_dict["{}-{}".format(cell_type0, cell_type1)] = model
         intf_tx['remove_prob'] = intf_tx.apply(lambda x: mix_norm_cdf(x['pct_diff'],
-                                                gmm_dict["{}-{}".format(x['celltype'], x['neighbor_celltype'])]), axis=1).values
+                                                gmm_dict["{}-{}".format(x['cell_type'], x['neighbor_celltype'])]), axis=1).values
 
         intf_tx['reassign'] = np.random.binomial(1, intf_tx['remove_prob'])
     else:
@@ -99,7 +101,7 @@ def propose_reassignment(adata: sc.AnnData,
     
     tx_to_reassign = intf_tx[intf_tx['reassign']==1]
     # We only keep the cell that is closest to the transcript 
-    tx_to_reassign = tx_to_reassign.groupby(tx_to_reassign.molecule_id).first()
+    tx_to_reassign = tx_to_reassign.groupby(tx_to_reassign.index).first()
     
     # Generate two patches for the count matrix 
     counts_to_subtract = pd.DataFrame(0, index=adata.obs_names, columns=adata.var_names)
@@ -152,7 +154,8 @@ def test_proposed_reassignment(adata: sc.AnnData,
     
     cell_types = np.unique(adata.obs['leiden'])
     test_result = {cell_type: {} for cell_type in cell_types}
-    for cell_type in cell_types:
+    print('Testing transcript reassignment...')
+    for cell_type in tqdm(cell_types):
         # For each cell type, we will perform a one-vs-other binary classification 
         # in cells without updates 
         index_other_type = (adata.obs['leiden'] != cell_type) & index_wo_updates
@@ -222,7 +225,8 @@ def make_reassignment(adata: sc.AnnData,
     """
     tx_assignment_addition['accept'] = True
     tx_assignment_removal['accept'] = True
-    for cell_type in test_result:
+    print('Finalize transcript reassignment...')
+    for cell_type in tqdm(test_result):
         # Removal is the one to be subtracted from   
         tx_assignment_removal.loc[tx_assignment_removal.cell_id.isin(test_result[cell_type]['contaminated_cell_ids']),
                                 "accept"] = False
