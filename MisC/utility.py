@@ -21,6 +21,11 @@ def import_data(cell_by_gene_counts: Union[str, pd.DataFrame],
                 y_col: str='center_y',
                 tx_x_col: str='global_x',
                 tx_y_col: str='global_y',
+                tx_geom_col: str='point',
+                cell_geom_col: str='Geometry',
+                gene_col: str='gene',
+                cell_col: str='cell_id',
+                celltype_col: str=None,
                 leiden_res: float=1,
                 preprocess = True,
                 ) -> Tuple[sc.AnnData, gpd.GeoDataFrame, gpd.GeoDataFrame]:
@@ -75,7 +80,6 @@ def import_data(cell_by_gene_counts: Union[str, pd.DataFrame],
         cell_coords = read_parquet(cell_boundary_polygons)
     else: 
         cell_coords = cell_boundary_polygons
-    
     # Transcript information 
     # We also convert the pandas dataframe to geopandas geodataframe 
     # by constructing points from the locations of each transcript
@@ -87,8 +91,17 @@ def import_data(cell_by_gene_counts: Union[str, pd.DataFrame],
     if not isinstance(tx_metadata, gpd.GeoDataFrame):
         tx_metadata = gpd.GeoDataFrame(tx_metadata, 
                                     geometry=gpd.points_from_xy(tx_metadata[tx_x_col], tx_metadata[tx_y_col]))
-        tx_metadata.rename_geometry("point", inplace=True)
+        tx_metadata.rename_geometry(tx_geom_col, inplace=True)
         tx_metadata.indx = ['tx_' + str(i+1) for i in range(tx_metadata.shape[0])]
+
+    # Sanitize column names
+    cell_coords.rename({cell_geom_col: 'Geometry'}, axis=1)
+    tx_metadata.rename(
+        {
+            tx_geom_col: 'point',
+            gene_col: 'gene',
+            cell_col: 'cell_id'
+            }, axis=1)
     # Create AnnData object to store the counts 
     # and facilitate future processing 
     adata = sc.AnnData(counts)
@@ -111,13 +124,14 @@ def import_data(cell_by_gene_counts: Union[str, pd.DataFrame],
         sc.pp.neighbors(adata)
         sc.tl.umap(adata)
     # And we will use leiden to perform cell clustering
-    if "cell_type" in cell_meta.columns:
+    if celltype_col is not None:
         print("Assigning pre-existing cell typing info from metadata.")
-        adata.obs['cell_type'] = cell_meta.loc[adata.obs_names,'cell_type']
-        adata.obs['leiden'] = cell_meta.loc[adata.obs_names,'cell_type'] 
+        adata.obs['cell_type'] = cell_meta.loc[adata.obs_names,celltype_col]
+        adata.obs['leiden'] = cell_meta.loc[adata.obs_names,celltype_col] 
     else:
         print("Performing Leiden clustering.")
-        sc.tl.leiden(adata, resolution=leiden_res)
+        sc.tl.leiden(adata, resolution=leiden_res, key_added='cell_type')
+        adata.obs['leiden'] = adata.obs['cell_type']
     print("Done~")
     print("="*30)
     return adata, cell_coords, tx_metadata
