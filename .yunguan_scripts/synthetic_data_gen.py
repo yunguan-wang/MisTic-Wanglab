@@ -1,6 +1,6 @@
 #%%
 import os
-from geopandas import read_parquet, GeoDataFrame, GeoSeries
+from geopandas import read_parquet, GeoDataFrame, GeoSeries,points_from_xy
 import shapely
 import numpy as np
 import scanpy as sc
@@ -107,25 +107,25 @@ np.random.seed(2)
 # %%
 # All data is downloaded from VizGen, except for the spacia_meta, which is generated based on 
 # in house cell typing.
-spacia_meta = pd.read_csv('hcc1_spacia_meta.txt', sep='\t', index_col=0)
-counts = pd.read_csv('cell_by_gene.csv', index_col=0)
-blanks = [x for x in counts.columns if x[:5] == 'Blank']
-counts = counts.drop(blanks, axis=1)
-counts.index = ['cell_' + str(x+1) for x in counts.index]
-counts = counts.loc[spacia_meta.index]
-# Construct shapely Polygon object from scratch.
-cell_masks = pd.read_csv('cell_coords.csv', index_col=0) # Cell masks were extracted from individual files from VizGen
-cell_masks.index = ['cell_' + str(x+1) for x in cell_masks.index]
-cell_masks = cell_masks.loc[spacia_meta.index]
-cell_masks['n_polygon'] = cell_masks.X.apply(lambda x: len(x.split('_')))
-cell_masks.X = cell_masks.X.str.split('_')
-cell_masks.Y = cell_masks.Y.str.split('_')
-cell_masks['polygon'] = cell_masks.apply(
-    lambda x: Polygon([(x.X[i], x.Y[i]) for i in range(x.n_polygon)]), axis=1)
-# Save as geopandas parquet file
-GeoDataFrame(
-    cell_masks[['polygon']],geometry='polygon'
-    ).to_parquet('cell_polygons.parquet', index=True)
+# spacia_meta = pd.read_csv('hcc1_spacia_meta.txt', sep='\t', index_col=0)
+# counts = pd.read_csv('cell_by_gene.csv', index_col=0)
+# blanks = [x for x in counts.columns if x[:5] == 'Blank']
+# counts = counts.drop(blanks, axis=1)
+# counts.index = ['cell_' + str(x+1) for x in counts.index]
+# counts = counts.loc[spacia_meta.index]
+# # Construct shapely Polygon object from scratch.
+# cell_masks = pd.read_csv('cell_coords.csv', index_col=0) # Cell masks were extracted from individual files from VizGen
+# cell_masks.index = ['cell_' + str(x+1) for x in cell_masks.index]
+# cell_masks = cell_masks.loc[spacia_meta.index]
+# cell_masks['n_polygon'] = cell_masks.X.apply(lambda x: len(x.split('_')))
+# cell_masks.X = cell_masks.X.str.split('_')
+# cell_masks.Y = cell_masks.Y.str.split('_')
+# cell_masks['polygon'] = cell_masks.apply(
+#     lambda x: Polygon([(x.X[i], x.Y[i]) for i in range(x.n_polygon)]), axis=1)
+# # Save as geopandas parquet file
+# GeoDataFrame(
+#     cell_masks[['polygon']],geometry='polygon'
+#     ).to_parquet('cell_polygons.parquet', index=True)
 #%%
 spacia_meta = pd.read_csv('hcc1_spacia_meta.txt', sep='\t', index_col=0)
 counts = pd.read_csv('cell_by_gene.csv', index_col=0)
@@ -227,14 +227,15 @@ interface_synthetic = mask_distance_synthetic[
 interface_synthetic['tumor_cell'] = interface_synthetic.index
 interface_synthetic = interface_synthetic.sort_values('mask_distance')
 # only simulated TX from one neighbor. 
-# TXs from another neighbor is conceptually equivalent and computationally a simple reapeat.
+# TXs from another neighbor is conceptually equivalent and computationally a simple repeat.
 interface_synthetic.drop_duplicates('tumor_cell', inplace=True)
 n_points = 200
 # doublet level means the fraction of cell in the interaface to have at least one added TX
 doublet_level = 0.4
 max_noise_tx = 10
 simulated_points = {}
-manipulated_cells = []
+# manipulated_cells = []
+neighbors = []
 for tumor_cell in interface_synthetic.index:
     if np.random.uniform(0,1,1)[0]>doublet_level:
         continue
@@ -249,6 +250,7 @@ for tumor_cell in interface_synthetic.index:
     if len(valid_points)==0:
         continue
     simulated_points[tumor_cell]= valid_points
+    neighbors += [neighbor] * len(valid_points)
 #%%
 # Differential analysis
 sc.pp.normalize_total(adata, target_sum=1000)
@@ -282,6 +284,7 @@ synthetic_txs = pd.DataFrame(
 synthetic_txs['gene'] = interface_synthetic.tx_symbol.explode()
 synthetic_txs['cell'] = synthetic_txs.index
 synthetic_txs['num'] = 1
+synthetic_txs['nearest_neighbor'] = neighbors
 count_delta = synthetic_txs.groupby(['cell','gene']).num.count()
 count_delta = count_delta.reset_index().pivot(
     columns='gene', values='num', index='cell').fillna(0).astype(int)
@@ -307,30 +310,38 @@ print(
 #%%
 tx_meta_interface = tx_meta[tx_meta.cell.isin(interface_synthetic.index)].copy()
 tx_meta_interface['tx_type'] = 'real'
-synthetic_tx_meta = synthetic_txs.copy().iloc[:,:-1]
-synthetic_tx_meta.columns = ['point', 'gene', 'cell']
+tx_meta_interface['point'] = points_from_xy(tx_meta_interface.global_x,tx_meta_interface.global_y)
+tx_meta_interface.rename({'cell':'cell_id'}, inplace=True, axis=1)
+synthetic_tx_meta = synthetic_txs.copy().drop('num',axis=1)
+synthetic_tx_meta.columns = ['point', 'gene', 'cell_id','neighbor']
 synthetic_tx_meta['tx_type'] = 'synthetic'
+synthetic_tx_meta.index = ['tx_s_' + str(i+1) for i in range(synthetic_tx_meta.shape[0])]
 tx_meta_interface = pd.concat([tx_meta_interface, synthetic_tx_meta])
-tx_meta_interface = tx_meta_interface.dropna(axis=1)
+tx_meta_interface = GeoDataFrame(tx_meta_interface, geometry='point')
+keep = ['gene', 'point', 'cell_id', 'tx_type', 'x', 'y','neighbor']
+tx_meta_interface = tx_meta_interface[keep]
+tx_meta_interface['x'] = tx_meta_interface.point.apply(lambda x: np.array(x.xy).flatten()[0])
+tx_meta_interface['y'] = tx_meta_interface.point.apply(lambda x: np.array(x.xy).flatten()[1])
 synthetic_counts.to_csv('synthetic_counts_with_doublets.csv')
-synthetic_tx_meta.to_csv('synthetic_counts_tx_metadata.csv')
+tx_meta_interface.to_parquet('synthetic_counts_tx_metadata.parquet', index=True)
+cell_meta_synthetic.loc[synthetic_counts.index].to_csv('synthetic_counts_with_doublets_metadata.csv')
 #%%
 # test plotting for debug purposes
-for cell in tx_meta_interface[tx_meta_interface.tx_type=='synthetic'].cell.value_counts().index[:5]:
-    _ = plt.figure()
-    cell_tx = tx_meta_interface[tx_meta_interface.cell==cell]
-    cell_poly = cell_masks.loc[cell,'polygon']
-    xs, ys = cell_poly.exterior.xy
-    plt.fill(xs, ys, alpha=0.5, fc='b', ec='none')
-    texts = []
-    for g, row in cell_tx.iterrows():
-        added_genes = cell_tx[cell_tx.tx_type!='real'].gene.unique()
-        try:
-            x, y = [float(i) for i in row['point'].split('(')[1][:-1].split(' ')]
-        except:
-            x, y = np.array(row['point'].xy).flatten()
-        plt.scatter(x, y, c= 'k' if row['tx_type'] == 'real' else 'r')
-        if row.gene in added_genes:
-            texts.append(plt.text(x, y, row.gene, c='m'))
-    adjustText.adjust_text(texts)
+# for cell in tx_meta_interface[tx_meta_interface.tx_type=='synthetic'].cell.value_counts().index[:5]:
+#     _ = plt.figure()
+#     cell_tx = tx_meta_interface[tx_meta_interface.cell==cell]
+#     cell_poly = cell_masks.loc[cell,'polygon']
+#     xs, ys = cell_poly.exterior.xy
+#     plt.fill(xs, ys, alpha=0.5, fc='b', ec='none')
+#     texts = []
+#     for g, row in cell_tx.iterrows():
+#         added_genes = cell_tx[cell_tx.tx_type!='real'].gene.unique()
+#         try:
+#             x, y = [float(i) for i in row['point'].split('(')[1][:-1].split(' ')]
+#         except:
+#             x, y = np.array(row['point'].xy).flatten()
+#         plt.scatter(x, y, c= 'k' if row['tx_type'] == 'real' else 'r')
+#         if row.gene in added_genes:
+#             texts.append(plt.text(x, y, row.gene, c='m'))
+#     adjustText.adjust_text(texts)
 # %%
