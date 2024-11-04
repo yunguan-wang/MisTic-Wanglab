@@ -7,6 +7,10 @@ import numpy as np
 from sklearn.mixture import GaussianMixture as GMM
 from sklearn.linear_model import LogisticRegression
 from scipy.stats import entropy
+from pydeseq2.dds import DeseqDataSet
+from pydeseq2.default_inference import DefaultInference
+from pydeseq2.ds import DeseqStats
+from itertools import permutations
 # Utility functions 
 from utility import annotate_tx_mask_distance, mix_norm_cdf, extract_layer_num
 # Typing 
@@ -59,12 +63,57 @@ def propose_reassignment(adata: sc.AnnData,
                                         mask_dist_cutoff=mask_dist_cutoff)
     # The basic logic for reassigning transcript is based on the difference of the 
     # expressed transcripts between two types of cells 
+    num_rep = 3
+    counts_list = []
+    for _ in range(num_rep):
+        rep_sample = adata.to_df(layer).groupby(adata.obs.leiden, 
+                                                observed=True, 
+                                                as_index=False).apply(lambda x: x.sample(1000, replace=True)).drop(columns=['cell_id'])
+        rep_sample.reset_index(drop=False, names=['leiden'], inplace=True)
+        rep_counts = rep_sample.groupby(by=['leiden'], observed=True, as_index=False).sum()
+        counts_list.append(rep_counts)
+    counts_df = pd.concat(counts_list, axis=0).reset_index(drop=True)    
+    counts_df["sample_id"] = "Sample"+counts_df.index.astype(str)
+    metadata = counts_df[["sample_id", "leiden"]].set_index("sample_id", inplace=False)
+    counts_df.drop(columns=['leiden'], inplace=True)
+    counts_df.set_index('sample_id', inplace=True)
+    inference = DefaultInference(n_cpus=8)
+    dds = DeseqDataSet(
+        counts=counts_df,
+        metadata=metadata,
+        design_factors="leiden",
+        refit_cooks=True,
+        inference=inference,
+    )
+    dds.deseq2()
+    for neighbor_celltype, celltype in permutations(percent_pos.index, 2):
+        stat_res = DeseqStats(dds, 
+                              inference=inference, 
+                              contrast=['leiden', neighbor_celltype, celltype],
+                              quiet=True)
+        stat_res.summary() 
+        ind = (stat_res.results_df['padj'] <= 0.05) & (stat_res.results_df['log2FoldChange']>1)
+        
+    
+    
     # If a type of transcript is lowly expressed in a cell but some transcripts of that type are 
     # present in that cell and the neighboring cell highly express that transcript, we reassign that transcripts 
     # We first compute the percentages of positively expressed genes in each cell type
     s_total = adata.to_df(layer).groupby(adata.obs.leiden, observed=True).count()
     s_above_0 = (adata.to_df(layer)>0).groupby(adata.obs.leiden, observed=True).sum()
     percent_pos = s_above_0 / s_total
+    rna_to_rm_df = []
+    for neighbor_celltype, celltype in permutations(percent_pos.index, 2):
+        diff_percent = percent_pos.loc[neighbor_celltype, :] - percent_pos.loc[celltype,:]
+        rna_to_rm = list(diff_percent.index[diff_percent>hard_threshold])
+        rna_to_rm_df.append([celltype, neighbor_celltype, rna_to_rm])
+    
+    rna_to_rm_df = pd.DataFrame(rna_to_rm_df, columns=['celltype', "neighbor_celltype", "gene"]).explode(column='gene')
+    rna_to_rm_df['to_remove'] = True
+    
+    
+    
+    
     
     # We only consider membrane transcripts 
     intf_tx = intf_tx[intf_tx.tx_mask_distance<tx_mask_d_max].sort_values('tx_mask_distance')
@@ -76,6 +125,9 @@ def propose_reassignment(adata: sc.AnnData,
     intf_tx['pct_diff'] = intf_tx.pct_exp_nearby - intf_tx.pct_exp_celltype
     
     if hard_threshold is None:
+        
+        
+        
         # Do not use 
         # Not completed 
         gmm_dict = {}

@@ -113,7 +113,7 @@ def calculate_mask_distance(adata: sc.AnnData,
                             min_centroid_dist: int=0,
                             cluster_col: str='leiden',
                             geometry_col: str='Geometry',
-                            re_cal_centroid_dist: bool=False) -> pd.DataFrame:
+                            re_cal_centroid_dist: bool=False) -> gpd.GeoDataFrame:
     """Calculate cell-cell distance based on their cell masks. The calculation is only done among 
     neighboring cells of different types. 
 
@@ -136,7 +136,7 @@ def calculate_mask_distance(adata: sc.AnnData,
 
     Returns
     -------
-    pd.DataFrame
+    gpd.GeoDataFrame
         A dataframe where each row is a pair of neighboring cells as well as their distance information 
     """
     
@@ -167,6 +167,11 @@ def calculate_mask_distance(adata: sc.AnnData,
         adj_nonself_masks_ids, columns=['neighbor_by_centroid'])
     mask_distance['mask_distance'] = md
     mask_distance.reset_index(inplace=True)
+    mask_distance = mask_distance.merge(adata.obs[['x', 'y']], how='left', 
+                                        left_on='cell_id', right_index=True)
+    mask_distance = gpd.GeoDataFrame(mask_distance, 
+                                     geometry=gpd.points_from_xy(mask_distance.x, mask_distance.y))
+    mask_distance.rename_geometry("centroid_geom", inplace=True)
     # recalculating the centroid distance is expansive, so it should be avoided
     if re_cal_centroid_dist:
         v1 = adata.obs.loc[mask_distance.index, ['x','y']].values
@@ -229,9 +234,10 @@ def annotate_tx_mask_distance(adata: sc.AnnData,
     intf_tx.columns = ['x','y','cell_id','gene','tx_geom']
     intf_tx.reset_index(inplace=True)
     # Then we compute the distance between transcript and cell mask of neighboring cell
-    intf_tx = intf_tx.merge(interface[['cell_id','neighbor_by_centroid','mask_distance']], on='cell_id')
+    intf_tx = intf_tx.merge(interface[['cell_id','neighbor_by_centroid','mask_distance','centroid_geom']], on='cell_id')
     intf_tx['mask_geom'] = cell_coords.loc[intf_tx.neighbor_by_centroid.values, geometry_col].values
     intf_tx['tx_mask_distance'] = distance(intf_tx['tx_geom'], intf_tx['mask_geom'])
+    intf_tx['tx_centroid_distance'] = distance(intf_tx['tx_geom'], intf_tx['centroid_geom'])
     intf_tx['celltype'] = adata.obs.loc[intf_tx.cell_id, cluster_col].values
     intf_tx['neighbor_celltype'] = adata.obs.loc[intf_tx.neighbor_by_centroid, cluster_col].values
     return intf_tx
@@ -276,6 +282,17 @@ def mask_eval(l: list) -> Tuple[bool, list]:
             if b not in np.array(unique_l):
                 unique_l.append(b)
     return len(unique_l) > 1, unique_l
+
+
+def smooth_transition_function(m, alpha):
+    assert m >= np.sqrt(3), "m needs to be >= \sqrt(3)"
+    assert alpha > 0, "alpha needs to be positive"
+    def fun(x):
+        
+        transformed_x = 2*(x**alpha)-1
+        kernel = transformed_x/(1-np.pow(transformed_x,2))
+        return 1/(1+np.exp(-2*m*kernel))
+    return fun
 
 
 ####################################
