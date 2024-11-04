@@ -67,7 +67,7 @@ def plot_tx(cell_id,
     cell_geom = cell_coords.loc[cell, 'Geometry']
     neighbor_geoms = current_intf_tx[current_intf_tx.cell_id==cell]['mask_geom'].unique()
     txs = current_intf_tx[current_intf_tx.cell_id==cell].sort_values('tx_mask_distance')
-    txs = txs.groupby(txs.molecule_id).first()
+    txs = txs.groupby(txs.index).first()
     tx = txs['tx_geom'].values
     tx_dist = txs['tx_mask_distance'].values
     tx_pct_diff = txs['pct_diff'].values
