@@ -12,9 +12,9 @@ from shapely import Point, Polygon, distance
 from pydeseq2.dds import DeseqDataSet
 from pydeseq2.default_inference import DefaultInference
 from pydeseq2.ds import DeseqStats
-from itertools import permutations
+from itertools import combinations
 # Utility functions 
-from utility import annotate_tx_mask_distance, extract_layer_num
+from MisC.utility import annotate_tx_mask_distance, extract_layer_num
 # Typing 
 from typing import Tuple, Optional 
 
@@ -91,7 +91,7 @@ def propose_reassignment(adata: sc.AnnData,
     )
     dds.deseq2()
     exp_list = []
-    for neighbor_celltype, celltype in permutations(np.unique(adata.obs['leiden']), 2):
+    for neighbor_celltype, celltype in combinations(np.unique(adata.obs['leiden']), 2):
         stat_res = DeseqStats(dds, 
                               inference=inference, 
                               contrast=['leiden', neighbor_celltype, celltype],
@@ -113,8 +113,8 @@ def propose_reassignment(adata: sc.AnnData,
     
     exp_df = pd.concat([exp_df0, exp_df1], axis=0).reset_index(drop=True)
     
-    intf_tx.merge(exp_df, how='left', 
-                  on=['cell_type', "neighbor_celltype", "gene"])
+    intf_tx = intf_tx.merge(exp_df, how='left', 
+                            on=['cell_type', "neighbor_celltype", "gene"])
         
     intf_tx = intf_tx.merge(adata.obs[["centroid_geom"]], how='left',
               left_on="cell_id", right_index=True).rename(columns={"centroid_geom": "self_centroid_geom"},
@@ -178,7 +178,7 @@ def propose_reassignment(adata: sc.AnnData,
     #     # If its greater than the threshold, we reassign the transcript 
     #     intf_tx['reassign'] = (intf_tx['pct_diff']>=hard_threshold).astype(int)
     
-    tx_to_reassign = intf_tx[intf_tx['reassign']==1]
+    tx_to_reassign = intf_tx.loc[intf_tx['reassign']==1, ['molecule_id', 'cell_id', 'neighbor_by_centroid', "gene"]]
     # We only keep the cell that is closest to the transcript 
     # tx_to_reassign = tx_to_reassign.groupby(tx_to_reassign.index).first()
     
@@ -197,11 +197,12 @@ def propose_reassignment(adata: sc.AnnData,
     counts_to_subtract.update(subtract_patch)
     counts_to_add.update(add_patch)
     
-    # Finally, record which transcript should be assigned to which cell as well as its original assignment
-    tx_assignment_addition = tx_to_reassign[['neighbor_by_centroid', "gene"]].rename(columns={"neighbor_by_centroid": "cell_id"})
-    tx_assignment_removal = tx_to_reassign[['cell_id', "gene"]]
+    # # Finally, record which transcript should be assigned to which cell as well as its original assignment
+    # tx_assignment_addition = tx_to_reassign[['neighbor_by_centroid', "gene"]].rename(columns={"neighbor_by_centroid": "cell_id"})
+    # tx_assignment_removal = tx_to_reassign[['cell_id', "gene"]]
 
-    return counts_to_subtract, counts_to_add, tx_assignment_addition, tx_assignment_removal
+    return counts_to_subtract, counts_to_add, tx_to_reassign
+            
 
 
 def test_proposed_reassignment(adata: sc.AnnData,
@@ -277,8 +278,9 @@ def test_proposed_reassignment(adata: sc.AnnData,
 def make_reassignment(adata: sc.AnnData,
                       layer: str,
                       tx_metadata: gpd.GeoDataFrame,
-                      tx_assignment_addition: pd.DataFrame, 
-                      tx_assignment_removal: pd.DataFrame,
+                    #   tx_assignment_addition: pd.DataFrame, 
+                    #   tx_assignment_removal: pd.DataFrame,
+                      tx_to_reassign: pd.DataFrame,
                       test_result: dict) -> Tuple[sc.AnnData, gpd.GeoDataFrame]:
     """Given the testing results, this function makes the actual reassignment and adjustment 
 
@@ -302,31 +304,43 @@ def make_reassignment(adata: sc.AnnData,
     Tuple[sc.AnnData, gpd.GeoDataFrame]
         The adjusted adata and tx_metadata 
     """
-    tx_assignment_addition['accept'] = True
-    tx_assignment_removal['accept'] = True
+    
+    tx_to_reassign['accept'] = True
+    
+    # tx_assignment_addition['accept'] = True
+    # tx_assignment_removal['accept'] = True
     print('Finalize transcript reassignment...')
     for cell_type in tqdm(test_result):
-        # Removal is the one to be subtracted from   
-        tx_assignment_removal.loc[tx_assignment_removal.cell_id.isin(test_result[cell_type]['contaminated_cell_ids']),
+        tx_to_reassign.loc[tx_to_reassign.cell_id.isin(test_result[cell_type]['contaminated_cell_ids']),
                                 "accept"] = False
+        # # Removal is the one to be subtracted from   
+        # tx_assignment_removal.loc[tx_assignment_removal.cell_id.isin(test_result[cell_type]['contaminated_cell_ids']),
+        #                         "accept"] = False
 
-        # Addition is the one to be added on 
-        tx_assignment_addition.loc[tx_assignment_addition.cell_id.isin(test_result[cell_type]['contaminated_cell_ids']),
-                                "accept"] = False
+        # # Addition is the one to be added on 
+        # tx_assignment_addition.loc[tx_assignment_addition.cell_id.isin(test_result[cell_type]['contaminated_cell_ids']),
+        #                         "accept"] = False
     
-    tx_assignment_addition = tx_assignment_addition[tx_assignment_addition['accept']]
-    tx_assignment_removal = tx_assignment_removal[tx_assignment_removal['accept']]
+    tx_to_reassign = tx_to_reassign[tx_to_reassign['accept']]
+    tx_to_reassign.drop(columns=['accept'], inplace=True)
     
-    tx_assignment_addition.drop(columns=['accept'], inplace=True)
-    tx_assignment_removal.drop(columns=['accept'], inplace=True)
+    
+    
+    # tx_assignment_addition = tx_assignment_addition[tx_assignment_addition['accept']]
+    # tx_assignment_removal = tx_assignment_removal[tx_assignment_removal['accept']]
+    
+    # tx_assignment_addition.drop(columns=['accept'], inplace=True)
+    # tx_assignment_removal.drop(columns=['accept'], inplace=True)
+    
     
     # Generate two patches for the count matrix 
     counts_to_subtract = pd.DataFrame(0, index=adata.obs_names, columns=adata.var_names)
     counts_to_add = pd.DataFrame(0, index=adata.obs_names, columns=adata.var_names)
     # For removal, we for each cell count how many genes occured 
-    cell_to_remove = tx_assignment_removal.groupby(by=['cell_id', "gene"], as_index=False).size()
+    cell_to_remove = tx_to_reassign.groupby(by=['cell_id', "gene"], as_index=False).size()
     # For addition, we for each cell in the neighbor count how many genes occured 
-    cell_to_add = tx_assignment_addition.groupby(by=['cell_id', "gene"], as_index=False).size()
+    cell_to_add = tx_to_reassign.groupby(by=['neighbor_by_centroid', "gene"], as_index=False).size()
+    cell_to_add.rename(columns={"neighbor_by_centroid": "cell_id"}, inplace=True)
     # Transform the dataframe from long to wide 
     subtract_patch = pd.pivot(cell_to_remove, values="size", columns="gene", index='cell_id').fillna(0)
     add_patch = pd.pivot(cell_to_add, values="size", columns="gene", index='cell_id').fillna(0)
@@ -334,12 +348,29 @@ def make_reassignment(adata: sc.AnnData,
     counts_to_subtract.update(subtract_patch)
     counts_to_add.update(add_patch)
     
+    
+    # # Generate two patches for the count matrix 
+    # counts_to_subtract = pd.DataFrame(0, index=adata.obs_names, columns=adata.var_names)
+    # counts_to_add = pd.DataFrame(0, index=adata.obs_names, columns=adata.var_names)
+    # # For removal, we for each cell count how many genes occured 
+    # cell_to_remove = tx_assignment_removal.groupby(by=['cell_id', "gene"], as_index=False).size()
+    # # For addition, we for each cell in the neighbor count how many genes occured 
+    # cell_to_add = tx_assignment_addition.groupby(by=['cell_id', "gene"], as_index=False).size()
+    # # Transform the dataframe from long to wide 
+    # subtract_patch = pd.pivot(cell_to_remove, values="size", columns="gene", index='cell_id').fillna(0)
+    # add_patch = pd.pivot(cell_to_add, values="size", columns="gene", index='cell_id').fillna(0)
+    # # The update the find matching rows and columns 
+    # counts_to_subtract.update(subtract_patch)
+    # counts_to_add.update(add_patch)
+    
     layer_num = extract_layer_num(layer)
     # Update adata
     adata.layers["counts_"+str(int(layer_num+1))] = adata.layers[layer]+counts_to_add-counts_to_subtract 
     # Updata transcripts 
+    tx_to_reassign.loc[:, ['cell_id', 'neighbor_by_centroid']] = tx_to_reassign.loc[:['neighbor_by_centroid', 'cell_id']]
+    tx_to_reassign.index = tx_to_reassign['molecule_id']
     tx_metadata["cell_id_"+str(layer_num)] = tx_metadata['cell_id']
-    tx_metadata.update(tx_assignment_addition)
+    tx_metadata.update(tx_to_reassign)
     # No need to update boundary or metadata 
     
     return adata, tx_metadata

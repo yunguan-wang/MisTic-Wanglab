@@ -94,6 +94,7 @@ def import_data(cell_by_gene_counts: Union[str, pd.DataFrame],
                                     geometry=gpd.points_from_xy(tx_metadata[tx_x_col], tx_metadata[tx_y_col]))
         tx_metadata.rename_geometry(tx_geom_col, inplace=True)
         tx_metadata.index = ['tx_' + str(i+1) for i in range(tx_metadata.shape[0])]
+        tx_metadata['molecule_id'] = tx_metadata.index
 
     # Sanitize column names
     cell_coords.rename({cell_geom_col: 'Geometry'}, axis=1, inplace=True)
