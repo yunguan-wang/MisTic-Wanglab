@@ -6,7 +6,7 @@ import pandas as pd
 # Data manipulation 
 import re 
 import numpy as np
-from shapely import Point, Polygon, distance
+from shapely import distance
 from scipy.spatial.distance import cdist
 from scipy.stats import norm
 from itertools import combinations
@@ -324,15 +324,36 @@ def mask_eval(l: list) -> Tuple[bool, list]:
     return len(unique_l) > 1, unique_l
 
 
-def smooth_transition_function(m, alpha):
-    assert m >= np.sqrt(3), "m needs to be >= \sqrt(3)"
-    assert alpha > 0, "alpha needs to be positive"
-    def fun(x):
+def generate_count_patches(adata,
+                           tx_to_reassign):
+    # Generate two patches for the count matrix 
+    counts_to_subtract = pd.DataFrame(0, index=adata.obs_names, columns=adata.var_names)
+    counts_to_add = pd.DataFrame(0, index=adata.obs_names, columns=adata.var_names)
+    # For removal, we for each cell count how many genes occured 
+    cell_to_remove = tx_to_reassign.groupby(by=['cell_id', "gene"], as_index=False).size()
+    # For addition, we for each cell in the neighbor count how many genes occured 
+    cell_to_add = tx_to_reassign.groupby(by=['neighbor_by_centroid', "gene"], as_index=False).size()
+    cell_to_add.rename(columns={"neighbor_by_centroid": "cell_id"}, inplace=True)
+    # Transform the dataframe from long to wide 
+    subtract_patch = pd.pivot(cell_to_remove, values="size", columns="gene", index='cell_id').fillna(0)
+    add_patch = pd.pivot(cell_to_add, values="size", columns="gene", index='cell_id').fillna(0)
+    # The update the find matching rows and columns 
+    counts_to_subtract.update(subtract_patch)
+    counts_to_add.update(add_patch)
+    
+    return counts_to_subtract, counts_to_add
+
+
+
+# def smooth_transition_function(m, alpha):
+#     assert m >= np.sqrt(3), "m needs to be >= \sqrt(3)"
+#     assert alpha > 0, "alpha needs to be positive"
+#     def fun(x):
         
-        transformed_x = 2*(x**alpha)-1
-        kernel = transformed_x/(1-np.pow(transformed_x,2))
-        return 1/(1+np.exp(-2*m*kernel))
-    return fun
+#         transformed_x = 2*(x**alpha)-1
+#         kernel = transformed_x/(1-np.pow(transformed_x,2))
+#         return 1/(1+np.exp(-2*m*kernel))
+#     return fun
 
 
 ####################################

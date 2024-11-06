@@ -5,16 +5,15 @@ import scanpy as sc
 import geopandas as gpd
 # Data manipulation 
 import numpy as np
-from sklearn.mixture import GaussianMixture as GMM
 from sklearn.linear_model import LogisticRegression
 from scipy.stats import entropy
-from shapely import Point, Polygon, distance
+from shapely import distance
 from pydeseq2.dds import DeseqDataSet
 from pydeseq2.default_inference import DefaultInference
 from pydeseq2.ds import DeseqStats
 from itertools import combinations
 # Utility functions 
-from MisC.utility import annotate_tx_mask_distance, extract_layer_num
+from MisC.utility import annotate_tx_mask_distance, extract_layer_num, generate_count_patches
 # Typing 
 from typing import Tuple, Optional 
 
@@ -71,7 +70,7 @@ def propose_reassignment(adata: sc.AnnData,
     for _ in range(num_rep):
         rep_sample = adata.to_df(layer).groupby(adata.obs.leiden, 
                                                 observed=True, 
-                                                as_index=False).apply(lambda x: x.sample(1000, replace=True))
+                                                as_index=False).apply(lambda x: x.sample(frac=0.75, replace=True))
         rep_sample.reset_index(drop=False, names=['leiden', 'cell_id'], inplace=True)
         rep_sample.drop(columns=['cell_id'], inplace=True)
         rep_counts = rep_sample.groupby(by=['leiden'], observed=True, as_index=False).sum()
@@ -182,20 +181,24 @@ def propose_reassignment(adata: sc.AnnData,
     # We only keep the cell that is closest to the transcript 
     # tx_to_reassign = tx_to_reassign.groupby(tx_to_reassign.index).first()
     
-    # Generate two patches for the count matrix 
-    counts_to_subtract = pd.DataFrame(0, index=adata.obs_names, columns=adata.var_names)
-    counts_to_add = pd.DataFrame(0, index=adata.obs_names, columns=adata.var_names)
-    # For removal, we for each cell count how many genes occured 
-    cell_to_remove = tx_to_reassign.groupby(by=['cell_id', "gene"], as_index=False).size()
-    # For addition, we for each cell in the neighbor count how many genes occured 
-    cell_to_add = tx_to_reassign.groupby(by=['neighbor_by_centroid', "gene"], as_index=False).size()
-    cell_to_add.rename(columns={"neighbor_by_centroid": "cell_id"}, inplace=True)
-    # Transform the dataframe from long to wide 
-    subtract_patch = pd.pivot(cell_to_remove, values="size", columns="gene", index='cell_id').fillna(0)
-    add_patch = pd.pivot(cell_to_add, values="size", columns="gene", index='cell_id').fillna(0)
-    # The update the find matching rows and columns 
-    counts_to_subtract.update(subtract_patch)
-    counts_to_add.update(add_patch)
+    
+    counts_to_subtract, counts_to_add = generate_count_patches(adata=adata,
+                                                               tx_to_reassign=tx_to_reassign)
+    
+    # # Generate two patches for the count matrix 
+    # counts_to_subtract = pd.DataFrame(0, index=adata.obs_names, columns=adata.var_names)
+    # counts_to_add = pd.DataFrame(0, index=adata.obs_names, columns=adata.var_names)
+    # # For removal, we for each cell count how many genes occured 
+    # cell_to_remove = tx_to_reassign.groupby(by=['cell_id', "gene"], as_index=False).size()
+    # # For addition, we for each cell in the neighbor count how many genes occured 
+    # cell_to_add = tx_to_reassign.groupby(by=['neighbor_by_centroid', "gene"], as_index=False).size()
+    # cell_to_add.rename(columns={"neighbor_by_centroid": "cell_id"}, inplace=True)
+    # # Transform the dataframe from long to wide 
+    # subtract_patch = pd.pivot(cell_to_remove, values="size", columns="gene", index='cell_id').fillna(0)
+    # add_patch = pd.pivot(cell_to_add, values="size", columns="gene", index='cell_id').fillna(0)
+    # # The update the find matching rows and columns 
+    # counts_to_subtract.update(subtract_patch)
+    # counts_to_add.update(add_patch)
     
     # # Finally, record which transcript should be assigned to which cell as well as its original assignment
     # tx_assignment_addition = tx_to_reassign[['neighbor_by_centroid', "gene"]].rename(columns={"neighbor_by_centroid": "cell_id"})
@@ -323,30 +326,28 @@ def make_reassignment(adata: sc.AnnData,
     
     tx_to_reassign = tx_to_reassign[tx_to_reassign['accept']]
     tx_to_reassign.drop(columns=['accept'], inplace=True)
-    
-    
-    
     # tx_assignment_addition = tx_assignment_addition[tx_assignment_addition['accept']]
     # tx_assignment_removal = tx_assignment_removal[tx_assignment_removal['accept']]
     
     # tx_assignment_addition.drop(columns=['accept'], inplace=True)
     # tx_assignment_removal.drop(columns=['accept'], inplace=True)
+    counts_to_subtract, counts_to_add = generate_count_patches(adata=adata,
+                                                               tx_to_reassign=tx_to_reassign)
     
-    
-    # Generate two patches for the count matrix 
-    counts_to_subtract = pd.DataFrame(0, index=adata.obs_names, columns=adata.var_names)
-    counts_to_add = pd.DataFrame(0, index=adata.obs_names, columns=adata.var_names)
-    # For removal, we for each cell count how many genes occured 
-    cell_to_remove = tx_to_reassign.groupby(by=['cell_id', "gene"], as_index=False).size()
-    # For addition, we for each cell in the neighbor count how many genes occured 
-    cell_to_add = tx_to_reassign.groupby(by=['neighbor_by_centroid', "gene"], as_index=False).size()
-    cell_to_add.rename(columns={"neighbor_by_centroid": "cell_id"}, inplace=True)
-    # Transform the dataframe from long to wide 
-    subtract_patch = pd.pivot(cell_to_remove, values="size", columns="gene", index='cell_id').fillna(0)
-    add_patch = pd.pivot(cell_to_add, values="size", columns="gene", index='cell_id').fillna(0)
-    # The update the find matching rows and columns 
-    counts_to_subtract.update(subtract_patch)
-    counts_to_add.update(add_patch)
+    # # Generate two patches for the count matrix 
+    # counts_to_subtract = pd.DataFrame(0, index=adata.obs_names, columns=adata.var_names)
+    # counts_to_add = pd.DataFrame(0, index=adata.obs_names, columns=adata.var_names)
+    # # For removal, we for each cell count how many genes occured 
+    # cell_to_remove = tx_to_reassign.groupby(by=['cell_id', "gene"], as_index=False).size()
+    # # For addition, we for each cell in the neighbor count how many genes occured 
+    # cell_to_add = tx_to_reassign.groupby(by=['neighbor_by_centroid', "gene"], as_index=False).size()
+    # cell_to_add.rename(columns={"neighbor_by_centroid": "cell_id"}, inplace=True)
+    # # Transform the dataframe from long to wide 
+    # subtract_patch = pd.pivot(cell_to_remove, values="size", columns="gene", index='cell_id').fillna(0)
+    # add_patch = pd.pivot(cell_to_add, values="size", columns="gene", index='cell_id').fillna(0)
+    # # The update the find matching rows and columns 
+    # counts_to_subtract.update(subtract_patch)
+    # counts_to_add.update(add_patch)
     
     
     # # Generate two patches for the count matrix 
@@ -367,7 +368,7 @@ def make_reassignment(adata: sc.AnnData,
     # Update adata
     adata.layers["counts_"+str(int(layer_num+1))] = adata.layers[layer]+counts_to_add-counts_to_subtract 
     # Updata transcripts 
-    tx_to_reassign.loc[:, ['cell_id', 'neighbor_by_centroid']] = tx_to_reassign.loc[:['neighbor_by_centroid', 'cell_id']]
+    tx_to_reassign.loc[:, ['cell_id', 'neighbor_by_centroid']] = tx_to_reassign.loc[:, ['neighbor_by_centroid', 'cell_id']]
     tx_to_reassign.index = tx_to_reassign['molecule_id']
     tx_metadata["cell_id_"+str(layer_num)] = tx_metadata['cell_id']
     tx_metadata.update(tx_to_reassign)
