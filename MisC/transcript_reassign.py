@@ -8,12 +8,13 @@ import numpy as np
 from sklearn.mixture import GaussianMixture as GMM
 from sklearn.linear_model import LogisticRegression
 from scipy.stats import entropy
+from shapely import Point, Polygon, distance
 from pydeseq2.dds import DeseqDataSet
 from pydeseq2.default_inference import DefaultInference
 from pydeseq2.ds import DeseqStats
 from itertools import permutations
 # Utility functions 
-from utility import annotate_tx_mask_distance, mix_norm_cdf, extract_layer_num
+from utility import annotate_tx_mask_distance, extract_layer_num
 # Typing 
 from typing import Tuple, Optional 
 
@@ -70,8 +71,9 @@ def propose_reassignment(adata: sc.AnnData,
     for _ in range(num_rep):
         rep_sample = adata.to_df(layer).groupby(adata.obs.leiden, 
                                                 observed=True, 
-                                                as_index=False).apply(lambda x: x.sample(1000, replace=True)).drop(columns=['cell_id'])
-        rep_sample.reset_index(drop=False, names=['leiden'], inplace=True)
+                                                as_index=False).apply(lambda x: x.sample(1000, replace=True))
+        rep_sample.reset_index(drop=False, names=['leiden', 'cell_id'], inplace=True)
+        rep_sample.drop(columns=['cell_id'], inplace=True)
         rep_counts = rep_sample.groupby(by=['leiden'], observed=True, as_index=False).sum()
         counts_list.append(rep_counts)
     counts_df = pd.concat(counts_list, axis=0).reset_index(drop=True)    
@@ -88,72 +90,97 @@ def propose_reassignment(adata: sc.AnnData,
         inference=inference,
     )
     dds.deseq2()
-    for neighbor_celltype, celltype in permutations(percent_pos.index, 2):
+    exp_list = []
+    for neighbor_celltype, celltype in permutations(np.unique(adata.obs['leiden']), 2):
         stat_res = DeseqStats(dds, 
                               inference=inference, 
                               contrast=['leiden', neighbor_celltype, celltype],
                               quiet=True)
         stat_res.summary() 
-        ind = (stat_res.results_df['padj'] <= 0.05) & (stat_res.results_df['log2FoldChange']>1)
-        
+        exp_list.append([celltype, neighbor_celltype, 
+                         list(stat_res.results_df.index), 
+                         list(stat_res.results_df['log2FoldChange']),
+                         list(stat_res.results_df['padj'])])
+    exp_df0 = pd.DataFrame(exp_list, columns=["cell_type", 'neighbor_celltype',
+                                            'gene', 'log2FoldChange', 'padj']).reset_index(drop=True)
+    exp_df0 = exp_df0.explode(column=['gene', 'log2FoldChange', 'padj'])
+    exp_df0['padj'] = -np.log10(exp_df0['padj'].astype(float)+1e-7)
+    exp_df0['log2FoldChange'] = exp_df0['log2FoldChange'].astype(float)
     
+    exp_df1 = exp_df0.copy()
+    exp_df1['cell_type'], exp_df1['neighbor_celltype'] = exp_df1['neighbor_celltype'], exp_df1['cell_type']
+    exp_df1['log2FoldChange'] *= -1
+    
+    exp_df = pd.concat([exp_df0, exp_df1], axis=0).reset_index(drop=True)
+    
+    intf_tx.merge(exp_df, how='left', 
+                  on=['cell_type', "neighbor_celltype", "gene"])
+        
+    intf_tx = intf_tx.merge(adata.obs[["centroid_geom"]], how='left',
+              left_on="cell_id", right_index=True).rename(columns={"centroid_geom": "self_centroid_geom"},
+                                                          inplace=False)
+              
+    intf_tx = intf_tx.merge(adata.obs[["centroid_geom"]], how='left',
+              left_on="neighbor_by_centroid", right_index=True).rename(columns={"centroid_geom": "neighbor_centroid_geom"},
+                                                          inplace=False)
+    intf_tx['self_centroid_distance'] = distance(intf_tx['point'], intf_tx['self_centroid_geom'])
+    intf_tx['neighbor_centroid_distance'] = distance(intf_tx['point'], intf_tx['neighbor_centroid_geom'])
+    intf_tx['distance_ratio'] = intf_tx['self_centroid_distance']/intf_tx['neighbor_centroid_distance']
+    intf_tx['distance_ratio'] = np.log2(intf_tx['distance_ratio'])
+    
+    intf_tx['reassign_logit'] = intf_tx['distance_ratio'] + intf_tx['log2FoldChange'] * intf_tx['padj']
+    
+    intf_tx["reassign_prob"] = 1/(1+np.exp(-intf_tx['reassign_logit']))
+    intf_tx['reassign'] = (intf_tx['reassign_prob']>0.9)
     
     # If a type of transcript is lowly expressed in a cell but some transcripts of that type are 
     # present in that cell and the neighboring cell highly express that transcript, we reassign that transcripts 
     # We first compute the percentages of positively expressed genes in each cell type
-    s_total = adata.to_df(layer).groupby(adata.obs.leiden, observed=True).count()
-    s_above_0 = (adata.to_df(layer)>0).groupby(adata.obs.leiden, observed=True).sum()
-    percent_pos = s_above_0 / s_total
-    rna_to_rm_df = []
-    for neighbor_celltype, celltype in permutations(percent_pos.index, 2):
-        diff_percent = percent_pos.loc[neighbor_celltype, :] - percent_pos.loc[celltype,:]
-        rna_to_rm = list(diff_percent.index[diff_percent>hard_threshold])
-        rna_to_rm_df.append([celltype, neighbor_celltype, rna_to_rm])
+    # s_total = adata.to_df(layer).groupby(adata.obs.leiden, observed=True).count()
+    # s_above_0 = (adata.to_df(layer)>0).groupby(adata.obs.leiden, observed=True).sum()
+    # percent_pos = s_above_0 / s_total
+    # rna_to_rm_df = []
+    # for neighbor_celltype, celltype in permutations(percent_pos.index, 2):
+    #     diff_percent = percent_pos.loc[neighbor_celltype, :] - percent_pos.loc[celltype,:]
+    #     rna_to_rm = list(diff_percent.index[diff_percent>hard_threshold])
+    #     rna_to_rm_df.append([celltype, neighbor_celltype, rna_to_rm])
     
-    rna_to_rm_df = pd.DataFrame(rna_to_rm_df, columns=['celltype', "neighbor_celltype", "gene"]).explode(column='gene')
-    rna_to_rm_df['to_remove'] = True
+    # rna_to_rm_df = pd.DataFrame(rna_to_rm_df, columns=['celltype', "neighbor_celltype", "gene"]).explode(column='gene')
+    # rna_to_rm_df['to_remove'] = True
+    # # We only consider membrane transcripts 
+    # intf_tx = intf_tx[intf_tx.tx_mask_distance<tx_mask_d_max].sort_values('tx_mask_distance')
+    # # Then we compute the differences in the percentages 
+    # intf_tx['pct_exp_celltype'] = intf_tx.apply(
+    #     lambda x: percent_pos.loc[x['cell_type'],x['gene']], axis=1).values
+    # intf_tx['pct_exp_nearby'] = intf_tx.apply(
+    #     lambda x: percent_pos.loc[x['neighbor_celltype'],x['gene']], axis=1).values
+    # intf_tx['pct_diff'] = intf_tx.pct_exp_nearby - intf_tx.pct_exp_celltype
     
-    
-    
-    
-    
-    # We only consider membrane transcripts 
-    intf_tx = intf_tx[intf_tx.tx_mask_distance<tx_mask_d_max].sort_values('tx_mask_distance')
-    # Then we compute the differences in the percentages 
-    intf_tx['pct_exp_celltype'] = intf_tx.apply(
-        lambda x: percent_pos.loc[x['cell_type'],x['gene']], axis=1).values
-    intf_tx['pct_exp_nearby'] = intf_tx.apply(
-        lambda x: percent_pos.loc[x['neighbor_celltype'],x['gene']], axis=1).values
-    intf_tx['pct_diff'] = intf_tx.pct_exp_nearby - intf_tx.pct_exp_celltype
-    
-    if hard_threshold is None:
-        
-        
-        
-        # Do not use 
-        # Not completed 
-        gmm_dict = {}
-        for cell_type0 in percent_pos.index:
-            for cell_type1 in percent_pos.index:
-                if cell_type0 == cell_type1:
-                    continue
-                # 0 vs other (if > 0 then gene expressed)
-                # only consider > 0
-                fold_change = np.log2(percent_pos.loc[cell_type0,:]+1) - np.log2(percent_pos.loc[cell_type1, :]+1)
-                model = GMM(2)
-                model.fit(fold_change.values.reshape((-1,1)))
-                gmm_dict["{}-{}".format(cell_type0, cell_type1)] = model
-        intf_tx['remove_prob'] = intf_tx.apply(lambda x: mix_norm_cdf(x['pct_diff'],
-                                                gmm_dict["{}-{}".format(x['cell_type'], x['neighbor_celltype'])]), axis=1).values
+    # if hard_threshold is None:
+    #     # Do not use 
+    #     # Not completed 
+    #     gmm_dict = {}
+    #     for cell_type0 in percent_pos.index:
+    #         for cell_type1 in percent_pos.index:
+    #             if cell_type0 == cell_type1:
+    #                 continue
+    #             # 0 vs other (if > 0 then gene expressed)
+    #             # only consider > 0
+    #             fold_change = np.log2(percent_pos.loc[cell_type0,:]+1) - np.log2(percent_pos.loc[cell_type1, :]+1)
+    #             model = GMM(2)
+    #             model.fit(fold_change.values.reshape((-1,1)))
+    #             gmm_dict["{}-{}".format(cell_type0, cell_type1)] = model
+    #     intf_tx['remove_prob'] = intf_tx.apply(lambda x: mix_norm_cdf(x['pct_diff'],
+    #                                             gmm_dict["{}-{}".format(x['cell_type'], x['neighbor_celltype'])]), axis=1).values
 
-        intf_tx['reassign'] = np.random.binomial(1, intf_tx['remove_prob'])
-    else:
-        # If its greater than the threshold, we reassign the transcript 
-        intf_tx['reassign'] = (intf_tx['pct_diff']>=hard_threshold).astype(int)
+    #     intf_tx['reassign'] = np.random.binomial(1, intf_tx['remove_prob'])
+    # else:
+    #     # If its greater than the threshold, we reassign the transcript 
+    #     intf_tx['reassign'] = (intf_tx['pct_diff']>=hard_threshold).astype(int)
     
     tx_to_reassign = intf_tx[intf_tx['reassign']==1]
     # We only keep the cell that is closest to the transcript 
-    tx_to_reassign = tx_to_reassign.groupby(tx_to_reassign.index).first()
+    # tx_to_reassign = tx_to_reassign.groupby(tx_to_reassign.index).first()
     
     # Generate two patches for the count matrix 
     counts_to_subtract = pd.DataFrame(0, index=adata.obs_names, columns=adata.var_names)

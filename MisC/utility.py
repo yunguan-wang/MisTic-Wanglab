@@ -93,21 +93,24 @@ def import_data(cell_by_gene_counts: Union[str, pd.DataFrame],
         tx_metadata = gpd.GeoDataFrame(tx_metadata, 
                                     geometry=gpd.points_from_xy(tx_metadata[tx_x_col], tx_metadata[tx_y_col]))
         tx_metadata.rename_geometry(tx_geom_col, inplace=True)
-        tx_metadata.indx = ['tx_' + str(i+1) for i in range(tx_metadata.shape[0])]
+        tx_metadata.index = ['tx_' + str(i+1) for i in range(tx_metadata.shape[0])]
 
     # Sanitize column names
-    cell_coords.rename({cell_geom_col: 'Geometry'}, axis=1)
+    cell_coords.rename({cell_geom_col: 'Geometry'}, axis=1, inplace=True)
     tx_metadata.rename(
         {
             tx_geom_col: 'point',
             gene_col: 'gene',
             cell_col: 'cell_id'
-            }, axis=1)
+            }, axis=1, inplace=True)
     # Create AnnData object to store the counts 
     # and facilitate future processing 
     adata = sc.AnnData(counts)
     adata.obs['x'] = cell_meta.loc[adata.obs_names,x_col]
     adata.obs['y'] = cell_meta.loc[adata.obs_names,y_col] 
+    adata.obs = gpd.GeoDataFrame(adata.obs,
+                                 geometry=gpd.points_from_xy(adata.obs['x'], adata.obs['y']))
+    adata.obs.rename_geometry("centroid_geom", inplace=True)
     # As we will alter the counts later on, we will save a copy of the 
     # original count in one of the layers 
     adata.layers['counts_0'] = counts.copy()
@@ -274,6 +277,8 @@ def annotate_tx_mask_distance(
     intf_tx['tx_mask_distance'] = distance(intf_tx[tx_geom_col], intf_tx['mask_geom'])
     intf_tx['cell_type'] = adata.obs.loc[intf_tx.cell_id, cluster_col].values
     intf_tx['neighbor_celltype'] = adata.obs.loc[intf_tx.neighbor_by_centroid, cluster_col].values
+    intf_tx.sort_values('tx_mask_distance', inplace=True)
+    intf_tx = intf_tx.groupby(['molecule_id'], as_index=False).nth(0).reset_index(drop=True)
     return intf_tx
 
 
