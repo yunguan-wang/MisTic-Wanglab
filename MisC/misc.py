@@ -39,7 +39,7 @@ class misc:
                                                       cell_coords=self.cell_coords)
     
     def _reassign_tx(self) -> None:
-        counts_to_subtract, counts_to_add, tx_assignment_addition, tx_assignment_removal = propose_reassignment(
+        counts_to_subtract, counts_to_add, tx_to_reassign = propose_reassignment(
             adata=self.adata, 
             tx_metadata=self.tx_metadata,
             cell_coords=self.cell_coords,
@@ -54,8 +54,7 @@ class misc:
             adata=self.adata,
             layer=self.current_layer,
             tx_metadata=self.tx_metadata,
-            tx_assignment_addition=tx_assignment_addition,
-            tx_assignment_removal=tx_assignment_removal,
+            tx_to_reassign=tx_to_reassign,
             test_result=test_result)
     
     def reassign_tx(self, n_iter: int) -> None:

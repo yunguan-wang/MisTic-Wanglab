@@ -13,6 +13,7 @@ from pydeseq2.default_inference import DefaultInference
 from pydeseq2.ds import DeseqStats
 from itertools import combinations
 # Utility functions 
+from MisC.de import de_deseq2
 from MisC.utility import annotate_tx_mask_distance, extract_layer_num, generate_count_patches
 # Typing 
 from typing import Tuple, Optional 
@@ -65,54 +66,14 @@ def propose_reassignment(adata: sc.AnnData,
                                         mask_dist_cutoff=mask_dist_cutoff)
     # The basic logic for reassigning transcript is based on the difference of the 
     # expressed transcripts between two types of cells 
-    num_rep = 3
-    counts_list = []
-    for _ in range(num_rep):
-        rep_sample = adata.to_df(layer).groupby(adata.obs.leiden, 
-                                                observed=True, 
-                                                as_index=False).apply(lambda x: x.sample(frac=0.75, replace=True))
-        rep_sample.reset_index(drop=False, names=['leiden', 'cell_id'], inplace=True)
-        rep_sample.drop(columns=['cell_id'], inplace=True)
-        rep_counts = rep_sample.groupby(by=['leiden'], observed=True, as_index=False).sum()
-        counts_list.append(rep_counts)
-    counts_df = pd.concat(counts_list, axis=0).reset_index(drop=True)    
-    counts_df["sample_id"] = "Sample"+counts_df.index.astype(str)
-    metadata = counts_df[["sample_id", "leiden"]].set_index("sample_id", inplace=False)
-    counts_df.drop(columns=['leiden'], inplace=True)
-    counts_df.set_index('sample_id', inplace=True)
-    inference = DefaultInference(n_cpus=8)
-    dds = DeseqDataSet(
-        counts=counts_df,
-        metadata=metadata,
-        design_factors="leiden",
-        refit_cooks=True,
-        inference=inference,
-    )
-    dds.deseq2()
-    exp_list = []
-    for neighbor_celltype, celltype in combinations(np.unique(adata.obs['leiden']), 2):
-        stat_res = DeseqStats(dds, 
-                              inference=inference, 
-                              contrast=['leiden', neighbor_celltype, celltype],
-                              quiet=True)
-        stat_res.summary() 
-        exp_list.append([celltype, neighbor_celltype, 
-                         list(stat_res.results_df.index), 
-                         list(stat_res.results_df['log2FoldChange']),
-                         list(stat_res.results_df['padj'])])
-    exp_df0 = pd.DataFrame(exp_list, columns=["cell_type", 'neighbor_celltype',
-                                            'gene', 'log2FoldChange', 'padj']).reset_index(drop=True)
-    exp_df0 = exp_df0.explode(column=['gene', 'log2FoldChange', 'padj'])
-    exp_df0['padj'] = -np.log10(exp_df0['padj'].astype(float)+1e-7)
-    exp_df0['log2FoldChange'] = exp_df0['log2FoldChange'].astype(float)
     
-    exp_df1 = exp_df0.copy()
-    exp_df1['cell_type'], exp_df1['neighbor_celltype'] = exp_df1['neighbor_celltype'], exp_df1['cell_type']
-    exp_df1['log2FoldChange'] *= -1
-    
-    exp_df = pd.concat([exp_df0, exp_df1], axis=0).reset_index(drop=True)
-    
-    intf_tx = intf_tx.merge(exp_df, how='left', 
+    exp_1v1_df, exp_1vR_df = de_deseq2(adata=adata,
+                                       layer=layer,
+                                       num_rep=3,
+                                       method="split",
+                                       n_cpus=8)
+
+    intf_tx = intf_tx.merge(exp_1v1_df, how='left', 
                             on=['cell_type', "neighbor_celltype", "gene"])
         
     intf_tx = intf_tx.merge(adata.obs[["centroid_geom"]], how='left',
@@ -132,77 +93,11 @@ def propose_reassignment(adata: sc.AnnData,
     intf_tx["reassign_prob"] = 1/(1+np.exp(-intf_tx['reassign_logit']))
     intf_tx['reassign'] = (intf_tx['reassign_prob']>0.9)
     
-    # If a type of transcript is lowly expressed in a cell but some transcripts of that type are 
-    # present in that cell and the neighboring cell highly express that transcript, we reassign that transcripts 
-    # We first compute the percentages of positively expressed genes in each cell type
-    # s_total = adata.to_df(layer).groupby(adata.obs.leiden, observed=True).count()
-    # s_above_0 = (adata.to_df(layer)>0).groupby(adata.obs.leiden, observed=True).sum()
-    # percent_pos = s_above_0 / s_total
-    # rna_to_rm_df = []
-    # for neighbor_celltype, celltype in permutations(percent_pos.index, 2):
-    #     diff_percent = percent_pos.loc[neighbor_celltype, :] - percent_pos.loc[celltype,:]
-    #     rna_to_rm = list(diff_percent.index[diff_percent>hard_threshold])
-    #     rna_to_rm_df.append([celltype, neighbor_celltype, rna_to_rm])
-    
-    # rna_to_rm_df = pd.DataFrame(rna_to_rm_df, columns=['celltype', "neighbor_celltype", "gene"]).explode(column='gene')
-    # rna_to_rm_df['to_remove'] = True
-    # # We only consider membrane transcripts 
-    # intf_tx = intf_tx[intf_tx.tx_mask_distance<tx_mask_d_max].sort_values('tx_mask_distance')
-    # # Then we compute the differences in the percentages 
-    # intf_tx['pct_exp_celltype'] = intf_tx.apply(
-    #     lambda x: percent_pos.loc[x['cell_type'],x['gene']], axis=1).values
-    # intf_tx['pct_exp_nearby'] = intf_tx.apply(
-    #     lambda x: percent_pos.loc[x['neighbor_celltype'],x['gene']], axis=1).values
-    # intf_tx['pct_diff'] = intf_tx.pct_exp_nearby - intf_tx.pct_exp_celltype
-    
-    # if hard_threshold is None:
-    #     # Do not use 
-    #     # Not completed 
-    #     gmm_dict = {}
-    #     for cell_type0 in percent_pos.index:
-    #         for cell_type1 in percent_pos.index:
-    #             if cell_type0 == cell_type1:
-    #                 continue
-    #             # 0 vs other (if > 0 then gene expressed)
-    #             # only consider > 0
-    #             fold_change = np.log2(percent_pos.loc[cell_type0,:]+1) - np.log2(percent_pos.loc[cell_type1, :]+1)
-    #             model = GMM(2)
-    #             model.fit(fold_change.values.reshape((-1,1)))
-    #             gmm_dict["{}-{}".format(cell_type0, cell_type1)] = model
-    #     intf_tx['remove_prob'] = intf_tx.apply(lambda x: mix_norm_cdf(x['pct_diff'],
-    #                                             gmm_dict["{}-{}".format(x['cell_type'], x['neighbor_celltype'])]), axis=1).values
-
-    #     intf_tx['reassign'] = np.random.binomial(1, intf_tx['remove_prob'])
-    # else:
-    #     # If its greater than the threshold, we reassign the transcript 
-    #     intf_tx['reassign'] = (intf_tx['pct_diff']>=hard_threshold).astype(int)
-    
     tx_to_reassign = intf_tx.loc[intf_tx['reassign']==1, ['molecule_id', 'cell_id', 'neighbor_by_centroid', "gene"]]
-    # We only keep the cell that is closest to the transcript 
-    # tx_to_reassign = tx_to_reassign.groupby(tx_to_reassign.index).first()
-    
     
     counts_to_subtract, counts_to_add = generate_count_patches(adata=adata,
                                                                tx_to_reassign=tx_to_reassign)
     
-    # # Generate two patches for the count matrix 
-    # counts_to_subtract = pd.DataFrame(0, index=adata.obs_names, columns=adata.var_names)
-    # counts_to_add = pd.DataFrame(0, index=adata.obs_names, columns=adata.var_names)
-    # # For removal, we for each cell count how many genes occured 
-    # cell_to_remove = tx_to_reassign.groupby(by=['cell_id', "gene"], as_index=False).size()
-    # # For addition, we for each cell in the neighbor count how many genes occured 
-    # cell_to_add = tx_to_reassign.groupby(by=['neighbor_by_centroid', "gene"], as_index=False).size()
-    # cell_to_add.rename(columns={"neighbor_by_centroid": "cell_id"}, inplace=True)
-    # # Transform the dataframe from long to wide 
-    # subtract_patch = pd.pivot(cell_to_remove, values="size", columns="gene", index='cell_id').fillna(0)
-    # add_patch = pd.pivot(cell_to_add, values="size", columns="gene", index='cell_id').fillna(0)
-    # # The update the find matching rows and columns 
-    # counts_to_subtract.update(subtract_patch)
-    # counts_to_add.update(add_patch)
-    
-    # # Finally, record which transcript should be assigned to which cell as well as its original assignment
-    # tx_assignment_addition = tx_to_reassign[['neighbor_by_centroid', "gene"]].rename(columns={"neighbor_by_centroid": "cell_id"})
-    # tx_assignment_removal = tx_to_reassign[['cell_id', "gene"]]
 
     return counts_to_subtract, counts_to_add, tx_to_reassign
             
@@ -309,60 +204,17 @@ def make_reassignment(adata: sc.AnnData,
     """
     
     tx_to_reassign['accept'] = True
-    
-    # tx_assignment_addition['accept'] = True
-    # tx_assignment_removal['accept'] = True
+
     print('Finalize transcript reassignment...')
     for cell_type in tqdm(test_result):
         tx_to_reassign.loc[tx_to_reassign.cell_id.isin(test_result[cell_type]['contaminated_cell_ids']),
                                 "accept"] = False
-        # # Removal is the one to be subtracted from   
-        # tx_assignment_removal.loc[tx_assignment_removal.cell_id.isin(test_result[cell_type]['contaminated_cell_ids']),
-        #                         "accept"] = False
-
-        # # Addition is the one to be added on 
-        # tx_assignment_addition.loc[tx_assignment_addition.cell_id.isin(test_result[cell_type]['contaminated_cell_ids']),
-        #                         "accept"] = False
     
     tx_to_reassign = tx_to_reassign[tx_to_reassign['accept']]
     tx_to_reassign.drop(columns=['accept'], inplace=True)
-    # tx_assignment_addition = tx_assignment_addition[tx_assignment_addition['accept']]
-    # tx_assignment_removal = tx_assignment_removal[tx_assignment_removal['accept']]
-    
-    # tx_assignment_addition.drop(columns=['accept'], inplace=True)
-    # tx_assignment_removal.drop(columns=['accept'], inplace=True)
+
     counts_to_subtract, counts_to_add = generate_count_patches(adata=adata,
                                                                tx_to_reassign=tx_to_reassign)
-    
-    # # Generate two patches for the count matrix 
-    # counts_to_subtract = pd.DataFrame(0, index=adata.obs_names, columns=adata.var_names)
-    # counts_to_add = pd.DataFrame(0, index=adata.obs_names, columns=adata.var_names)
-    # # For removal, we for each cell count how many genes occured 
-    # cell_to_remove = tx_to_reassign.groupby(by=['cell_id', "gene"], as_index=False).size()
-    # # For addition, we for each cell in the neighbor count how many genes occured 
-    # cell_to_add = tx_to_reassign.groupby(by=['neighbor_by_centroid', "gene"], as_index=False).size()
-    # cell_to_add.rename(columns={"neighbor_by_centroid": "cell_id"}, inplace=True)
-    # # Transform the dataframe from long to wide 
-    # subtract_patch = pd.pivot(cell_to_remove, values="size", columns="gene", index='cell_id').fillna(0)
-    # add_patch = pd.pivot(cell_to_add, values="size", columns="gene", index='cell_id').fillna(0)
-    # # The update the find matching rows and columns 
-    # counts_to_subtract.update(subtract_patch)
-    # counts_to_add.update(add_patch)
-    
-    
-    # # Generate two patches for the count matrix 
-    # counts_to_subtract = pd.DataFrame(0, index=adata.obs_names, columns=adata.var_names)
-    # counts_to_add = pd.DataFrame(0, index=adata.obs_names, columns=adata.var_names)
-    # # For removal, we for each cell count how many genes occured 
-    # cell_to_remove = tx_assignment_removal.groupby(by=['cell_id', "gene"], as_index=False).size()
-    # # For addition, we for each cell in the neighbor count how many genes occured 
-    # cell_to_add = tx_assignment_addition.groupby(by=['cell_id', "gene"], as_index=False).size()
-    # # Transform the dataframe from long to wide 
-    # subtract_patch = pd.pivot(cell_to_remove, values="size", columns="gene", index='cell_id').fillna(0)
-    # add_patch = pd.pivot(cell_to_add, values="size", columns="gene", index='cell_id').fillna(0)
-    # # The update the find matching rows and columns 
-    # counts_to_subtract.update(subtract_patch)
-    # counts_to_add.update(add_patch)
     
     layer_num = extract_layer_num(layer)
     # Update adata

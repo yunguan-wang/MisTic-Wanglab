@@ -137,6 +137,8 @@ def import_data(cell_by_gene_counts: Union[str, pd.DataFrame],
         print("Performing Leiden clustering.")
         sc.tl.leiden(adata, resolution=leiden_res, key_added='cell_type')
         adata.obs['leiden'] = adata.obs['cell_type']
+    
+    adata.uns['counts_0_leiden'] = adata.obs['leiden'].cat.categories
     print("Done~")
     print("="*30)
     return adata, cell_coords, tx_metadata
@@ -147,8 +149,6 @@ def calculate_mask_distance(adata: sc.AnnData,
                             cell_coords: gpd.GeoDataFrame,
                             max_centroid_dist: int=50,
                             min_centroid_dist: int=0,
-                            cluster_col: str='leiden',
-                            geometry_col: str='Geometry',
                             re_cal_centroid_dist: bool=False) -> gpd.GeoDataFrame:
     """Calculate cell-cell distance based on their cell masks. The calculation is only done among 
     neighboring cells of different types. 
@@ -190,14 +190,14 @@ def calculate_mask_distance(adata: sc.AnnData,
     # We further exclude cells from the same cell cluster
     # since we are only interested in comparing the transcript abundances among cells of different types 
     adj = adj.agg(lambda x: [
-            y for y in x.n if adata.obs.loc[y, cluster_col]!=adata.obs.loc[x.name, cluster_col]], axis=1)
+            y for y in x.n if adata.obs.loc[y, ['leiden']]!=adata.obs.loc[x.name, ['leiden']]], axis=1)
     # We then exclude cells surrounded by cells of its own type 
     adj_nonself = adj[adj.apply(len)>0]
     # Then we compute the cell-cell distance based on their masks
     adj_nonself_masks_ids = adj_nonself.explode()
     md = distance(
-        cell_coords.loc[adj_nonself_masks_ids.index, geometry_col].values,
-        cell_coords.loc[adj_nonself_masks_ids.values, geometry_col].values
+        cell_coords.loc[adj_nonself_masks_ids.index, "Geometry"].values,
+        cell_coords.loc[adj_nonself_masks_ids.values, "Geometry"].values
     )
     mask_distance = pd.DataFrame(
         adj_nonself_masks_ids, columns=['neighbor_by_centroid'])
@@ -345,41 +345,4 @@ def generate_count_patches(adata,
 
 
 
-# def smooth_transition_function(m, alpha):
-#     assert m >= np.sqrt(3), "m needs to be >= \sqrt(3)"
-#     assert alpha > 0, "alpha needs to be positive"
-#     def fun(x):
-        
-#         transformed_x = 2*(x**alpha)-1
-#         kernel = transformed_x/(1-np.pow(transformed_x,2))
-#         return 1/(1+np.exp(-2*m*kernel))
-#     return fun
 
-
-####################################
-# Wait till future updates
-def mix_norm_cdf(x, model):
-    weights, means, covars = model.weights_, model.means_.reshape(-1), model.covariances_.reshape(-1)
-    mcdf = 0.0
-    for i in range(len(weights)):
-        mcdf += weights[i] * norm.cdf(x, loc=means[i], scale=np.sqrt(covars[i]))
-    return mcdf
-
-
-
-def random_downsample(counts: pd.DataFrame, cells: list , n_remove:int = 5):
-    cell_counts = counts.loc[cells,:].copy()
-    cell_counts.index = cell_counts.index.astype(str)
-    n_remove = np.minimum((cell_counts.sum(axis=1)/10).values, n_remove).astype(int)
-    for c, n in zip(cells, n_remove):
-        genes = cell_counts.columns[cell_counts.loc[c,:]>0]
-        while True:
-            remove = np.random.choice(genes, n)
-            remove, remove_counts = np.unique(remove, return_counts=True)
-            if (cell_counts.loc[c, remove] >= remove_counts).all():
-                break
-        cell_counts.loc[c, remove] -= remove_counts
-    return cell_counts
-
-
-    
