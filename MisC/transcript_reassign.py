@@ -7,14 +7,9 @@ import geopandas as gpd
 import numpy as np
 from sklearn.linear_model import LogisticRegression
 from scipy.stats import entropy
-from shapely import distance
-from pydeseq2.dds import DeseqDataSet
-from pydeseq2.default_inference import DefaultInference
-from pydeseq2.ds import DeseqStats
-from itertools import combinations
 # Utility functions 
-from MisC.de import de_deseq2
-from MisC.utility import annotate_tx_mask_distance, extract_layer_num, generate_count_patches
+from MisC.generate_tx_feature import generate_feature
+from MisC.utility import  extract_layer_num, generate_count_patches
 # Typing 
 from typing import Tuple, Optional 
 
@@ -24,9 +19,7 @@ def propose_reassignment(adata: sc.AnnData,
                          cell_coords: gpd.GeoDataFrame,
                          layer: str, 
                          mask_distance: pd.DataFrame, 
-                         mask_dist_cutoff: float=1, 
-                         tx_mask_d_max: float = 2.0,
-                         hard_threshold: Optional[float]=None) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+                         mask_dist_cutoff: float=1) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """Generate updates to the cell-by-gene counts matrix and the transcript matrix 
 
     Parameters
@@ -43,10 +36,6 @@ def propose_reassignment(adata: sc.AnnData,
         A dataframe where each row is a pair of neighboring cells as well as their distance information 
     mask_dist_cutoff : float, optional
         The threshold of cell-cell distances beyond which a cell is no longer considered a neighbor, by default 1
-    tx_mask_d_max : float, optional
-        The threshold beyond which we do not consider a certain transcript as a membrane transcript, by default 2.0
-    hard_threshold : Optional[float], optional
-        The threshold on the difference of percentages, by default None
 
     Returns
     -------
@@ -59,34 +48,38 @@ def propose_reassignment(adata: sc.AnnData,
     """
     #TODO: Add a progress bar
     print('Identifying transcripts that need to be reassigned...')
-    intf_tx = annotate_tx_mask_distance(adata=adata,
-                                        tx_metadata=tx_metadata,
-                                        cell_coords=cell_coords,
-                                        mask_distance=mask_distance, 
-                                        mask_dist_cutoff=mask_dist_cutoff)
+    # intf_tx = annotate_tx_mask_distance(adata=adata,
+    #                                     tx_metadata=tx_metadata,
+    #                                     cell_coords=cell_coords,
+    #                                     mask_distance=mask_distance, 
+    #                                     mask_dist_cutoff=mask_dist_cutoff)
     # The basic logic for reassigning transcript is based on the difference of the 
     # expressed transcripts between two types of cells 
+    # intf_tx = distance_feature(adata=adata,
+    #                            tx_metadata=tx_metadata,
+    #                            cell_coords=cell_coords,
+    #                            mask_distance=mask_distance,
+    #                            mask_dist_cutoff=mask_dist_cutoff)
     
-    exp_1v1_df, exp_1vR_df = de_deseq2(adata=adata,
-                                       layer=layer,
-                                       num_rep=3,
-                                       method="split",
-                                       n_cpus=8)
+    
+    # exp_1v1_df, exp_1vR_df = expression_feature(adata=adata,
+    #                                    layer=layer,
+    #                                    num_rep=3,
+    #                                    method="split",
+    #                                    n_cpus=8)
 
-    intf_tx = intf_tx.merge(exp_1v1_df, how='left', 
-                            on=['cell_type', "neighbor_celltype", "gene"])
+    # intf_tx = intf_tx.merge(exp_1v1_df, how='left', 
+    #                         on=['cell_type', "neighbor_celltype", "gene"])
         
-    intf_tx = intf_tx.merge(adata.obs[["centroid_geom"]], how='left',
-              left_on="cell_id", right_index=True).rename(columns={"centroid_geom": "self_centroid_geom"},
-                                                          inplace=False)
+    # intf_tx = intf_tx.merge(adata.obs[["cell_centroid_geom"]], how='left',
+    #           left_on="cell_id", right_index=True).rename(columns={"cell_centroid_geom": "self_centroid_geom"},
+    #                                                       inplace=False)
               
-    intf_tx = intf_tx.merge(adata.obs[["centroid_geom"]], how='left',
-              left_on="neighbor_by_centroid", right_index=True).rename(columns={"centroid_geom": "neighbor_centroid_geom"},
-                                                          inplace=False)
-    intf_tx['self_centroid_distance'] = distance(intf_tx['point'], intf_tx['self_centroid_geom'])
-    intf_tx['neighbor_centroid_distance'] = distance(intf_tx['point'], intf_tx['neighbor_centroid_geom'])
-    intf_tx['distance_ratio'] = intf_tx['self_centroid_distance']/intf_tx['neighbor_centroid_distance']
-    intf_tx['distance_ratio'] = np.log2(intf_tx['distance_ratio'])
+    # intf_tx = intf_tx.merge(adata.obs[["centroid_geom"]], how='left',
+    #           left_on="neighbor_cell_id", right_index=True).rename(columns={"cell_centroid_geom": "neighbor_centroid_geom"},
+    #                                                       inplace=False)
+    
+    
     
     intf_tx['reassign_logit'] = intf_tx['distance_ratio'] + intf_tx['log2FoldChange'] * intf_tx['padj']
     

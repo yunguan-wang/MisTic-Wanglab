@@ -6,24 +6,33 @@ import scanpy as sc
 import geopandas as gpd
 # Data manipulation 
 import numpy as np
+import torch 
+import torch.nn as nn 
+import torch.nn.functional as F
 from geopandas import GeoDataFrame  
 from shapely import Polygon
 # Utility function 
-from MisC.utility import import_data, calculate_mask_distance, extract_layer_num, mask_eval
+from MisC.utility import import_data, calculate_mask_distance, binary_gumbel_softmax_sample, extract_layer_num, mask_eval
 from MisC.transcript_reassign import propose_reassignment, test_proposed_reassignment, make_reassignment
 # Typing 
 from typing import Tuple, Union, Optional 
 
 
 
-class misc:
+class misc(nn.Module):
     def __init__(self) -> None:
+        super().__init__()
         self.adata = None
         self.cell_coords = None
         self.tx_metadata = None
         self.current_layer = "counts_0"
         self.mask_distance = None
-
+        
+        self.reassign_coefficients = None 
+        self.cell_type_coefficients = None 
+        self.optimizer = None
+        
+        
     def import_data(self,
                     cell_by_gene_counts: Union[str, pd.DataFrame],
                     cell_metadata: Union[str, pd.DataFrame],
@@ -37,6 +46,64 @@ class misc:
                                                                       **kwargs)
         self.mask_distance = calculate_mask_distance(adata=self.adata,
                                                       cell_coords=self.cell_coords)
+
+        self.reassign_coefficients = nn.Linear(in_features=3, out_features=1, bias=True)
+        self.cell_type_coefficients = nn.Linear(in_features=self.adata.uns['n_genes'], 
+                                                out_features=self.adata.uns['counts_0_n_leiden'],
+                                                bias=True)
+        
+    def encode(self, tx_features):
+        reassign_logits = self.reassign_coefficients(tx_features) 
+        return reassign_logits
+        
+    def decode(self, updated_cell_by_gene_counts):
+        cell_type_logits = self.cell_type_coefficients(updated_cell_by_gene_counts)
+        cell_type_probs = F.softmax(cell_type_logits, dim=-1)
+        return cell_type_probs
+    
+    def forward(self,
+                tx_features, 
+                cell_by_gene_counts, 
+                row_index_self,
+                row_index_neighbor,
+                col_index,
+                temperature):
+        reassign_logits = self.encode(tx_features=tx_features)
+        reassign_probs = binary_gumbel_softmax_sample(logits=reassign_logits,
+                                                        temperature=temperature)
+        reassign_hard = torch.round(reassign_probs, deccimals=0)
+        reassign_hard = (reassign_hard - reassign_probs).detach() + reassign_probs
+        
+        index_self = row_index_self * self.adata.uns['n_genes'] + col_index
+        index_neighbor = row_index_neighbor * self.adata.uns['n_genes'] + col_index
+        
+        update_patch_self = torch.zeros(408*400, 1, dtype=torch.float32).scatter_add(0, index_self, reassign_hard)
+        update_patch_neighbor = torch.zeros(408*400, 1, dtype=torch.float32).scatter_add(0, index_neighbor, reassign_hard)
+    
+        ordered_row_index = np.repead()
+        ordered_col_index = np.tile()
+        
+        cell_by_gene_counts[ordered_row_index, ordered_col_index] -= update_patch_self.squeeze(1)
+        cell_by_gene_counts[ordered_row_index, ordered_col_index] += update_patch_neighbor.squeeze(1)
+        
+        cell_type_probs = self.decode(updated_cell_by_gene_counts=cell_by_gene_counts)
+        
+        return reassign_hard, reassign_probs, cell_type_probs
+    
+    def train(self,
+              n_epochs):
+        self.train()
+        true_labels = 0   
+        reassign_hard, cell_type_probs = self()
+        log_likelihood = F.cross_entropy(cell_type_probs, true_labels, reduction='sum')
+        
+        kl = 0
+        
+        loss = log_likelihood + kl
+        
+        
+        
+
     
     def _reassign_tx(self) -> None:
         counts_to_subtract, counts_to_add, tx_to_reassign = propose_reassignment(

@@ -1,4 +1,5 @@
 # Data IO
+import os 
 import scanpy as sc
 import geopandas as gpd
 from geopandas import read_parquet
@@ -6,9 +7,10 @@ import pandas as pd
 # Data manipulation 
 import re 
 import numpy as np
+import torch
+import torch.nn.functional as F
 from shapely import distance
 from scipy.spatial.distance import cdist
-from scipy.stats import norm
 from itertools import combinations
 # Typing 
 from typing import Optional, Union, Tuple
@@ -17,25 +19,20 @@ from typing import Optional, Union, Tuple
 def import_data(cell_by_gene_counts: Union[str, pd.DataFrame],
                 cell_metadata: Union[str, pd.DataFrame],
                 cell_boundary_polygons: Union[str, gpd.GeoDataFrame],
-                detected_transcripts: Union[str, pd.DataFrame],
-                x_col: str='center_x',
-                y_col: str='center_y',
+                detected_transcripts: Union[str, pd.DataFrame, gpd.GeoDataFrame],
+                cell_centroid_x_col: str='center_x',
+                cell_centroid_y_col: str='center_y',
                 tx_x_col: str='global_x',
                 tx_y_col: str='global_y',
-                tx_geom_col: str='point',
-                cell_geom_col: str='Geometry',
                 gene_col: str='gene',
                 cell_col: str='cell_id',
-                celltype_col: str=None,
+                celltype_col: Optional[str]=None,
                 leiden_res: float=1,
-                preprocess = True,
+                preprocess: bool=True,
                 ) -> Tuple[sc.AnnData, gpd.GeoDataFrame, gpd.GeoDataFrame]:
     """Read in the four pieces information needed for subsequent analysis: 
     cell-by-gene counts, cell metadata, cell boundary information, and transcript information. Some 
     basic visualization and cell clustering will be performed. 
-    
-    #TODO: This function needs to sanitize all columns names to be used in later processes.
-    #TODO: Rename xy coordinates to 'x', and 'y', and cell names to 'cell_id' and cell type to 'cell_type'
 
     Parameters
     ----------
@@ -65,53 +62,65 @@ def import_data(cell_by_gene_counts: Union[str, pd.DataFrame],
     """
     
     # Cell by gene counts matrix 
-    if isinstance(cell_by_gene_counts, str):
+    if isinstance(cell_by_gene_counts, str) and ("csv" in os.path.splitext(cell_by_gene_counts)[1]):
         counts = pd.read_csv(cell_by_gene_counts, index_col=0)
-    else:
+    elif isinstance(cell_by_gene_counts, pd.DataFrame):
         counts = cell_by_gene_counts
-    
+    else: 
+        raise TypeError("Only .csv file or pandas dataframe is allowed")
+    counts.index.rename(name='cell_id', inplace=True)
     # Cell metadata
-    if isinstance(cell_metadata, str):
+    if isinstance(cell_metadata, str) and ("csv" in os.path.splitext(cell_metadata)[1]):
         cell_meta = pd.read_csv(cell_metadata, index_col=0)
-    else: 
+    elif isinstance(cell_metadata, pd.DataFrame):
         cell_meta = cell_metadata
-    
-    # Polygons of cells 
-    if isinstance(cell_boundary_polygons, str):
-        cell_coords = read_parquet(cell_boundary_polygons)
     else: 
+        raise TypeError("Only .csv file or pandas dataframe is allowed")
+    cell_meta.index.rename(name='cell_id', inplace=True)
+    cell_meta.rename(columns={cell_centroid_x_col: "center_x",
+                              cell_centroid_y_col: "center_y"}, inplace=True)
+    # Polygons of cells 
+    if isinstance(cell_boundary_polygons, str) and ("parquet" in os.path.splitext(cell_boundary_polygons)[1]):
+        cell_coords = read_parquet(cell_boundary_polygons)
+    elif isinstance(cell_boundary_polygons, gpd.GeoDataFrame):
         cell_coords = cell_boundary_polygons
+    else: 
+        raise TypeError("Only .parquet file or geopandas dataframe is allowed")
+    cell_coords.index.rename(name='cell_id', inplace=True)
+    cell_coords.rename_geometry("cell_boundary_geom", inplace=True)
     # Transcript information 
     # We also convert the pandas dataframe to geopandas geodataframe 
     # by constructing points from the locations of each transcript
-    if isinstance(detected_transcripts, str):
+    if isinstance(detected_transcripts, str) and ("parquet" in os.path.splitext(detected_transcripts)[1]):
+        tx_metadata = read_parquet(detected_transcripts)
+    elif isinstance(detected_transcripts, str) and ("csv" in os.path.splitext(detected_transcripts)[1]):
         tx_metadata = pd.read_csv(detected_transcripts, index_col=0)    
-    else:
+    elif isinstance(detected_transcripts, pd.DataFrame) or isinstance(detected_transcripts, gpd.GeoDataFrame):
         tx_metadata = detected_transcripts
+    else: 
+        raise TypeError("Only .parquet/.csv file or geopandas/pandas dataframe is allowed")
 
     if not isinstance(tx_metadata, gpd.GeoDataFrame):
         tx_metadata = gpd.GeoDataFrame(tx_metadata, 
-                                    geometry=gpd.points_from_xy(tx_metadata[tx_x_col], tx_metadata[tx_y_col]))
-        tx_metadata.rename_geometry(tx_geom_col, inplace=True)
+                                       geometry=gpd.points_from_xy(tx_metadata[tx_x_col], tx_metadata[tx_y_col]))
+        
         tx_metadata.index = ['tx_' + str(i+1) for i in range(tx_metadata.shape[0])]
         tx_metadata['molecule_id'] = tx_metadata.index
-
-    # Sanitize column names
-    cell_coords.rename({cell_geom_col: 'Geometry'}, axis=1, inplace=True)
+    tx_metadata.rename_geometry("tx_geom", inplace=True)
     tx_metadata.rename(
-        {
-            tx_geom_col: 'point',
+        columns={
             gene_col: 'gene',
             cell_col: 'cell_id'
-            }, axis=1, inplace=True)
+            }, inplace=True)
     # Create AnnData object to store the counts 
     # and facilitate future processing 
     adata = sc.AnnData(counts)
-    adata.obs['x'] = cell_meta.loc[adata.obs_names,x_col]
-    adata.obs['y'] = cell_meta.loc[adata.obs_names,y_col] 
+    adata.obs['x'] = cell_meta.loc[adata.obs_names, "center_x"]
+    adata.obs['y'] = cell_meta.loc[adata.obs_names, "center_y"]
     adata.obs = gpd.GeoDataFrame(adata.obs,
                                  geometry=gpd.points_from_xy(adata.obs['x'], adata.obs['y']))
-    adata.obs.rename_geometry("centroid_geom", inplace=True)
+    adata.obs.rename_geometry("cell_centroid_geom", inplace=True)
+    adata.var['col_index'] = [i for i in range(adata.var.shape[0])]
     # As we will alter the counts later on, we will save a copy of the 
     # original count in one of the layers 
     adata.layers['counts_0'] = counts.copy()
@@ -131,14 +140,21 @@ def import_data(cell_by_gene_counts: Union[str, pd.DataFrame],
     # And we will use leiden to perform cell clustering
     if celltype_col is not None:
         print("Assigning pre-existing cell typing info from metadata.")
-        adata.obs['cell_type'] = cell_meta.loc[adata.obs_names,celltype_col]
-        adata.obs['leiden'] = cell_meta.loc[adata.obs_names,celltype_col] 
+        adata.obs['cell_type'] = cell_meta.loc[adata.obs_names, celltype_col]
+        adata.obs['leiden'] = pd.factorize(cell_meta.loc[adata.obs_names, celltype_col])[0]
     else:
         print("Performing Leiden clustering.")
         sc.tl.leiden(adata, resolution=leiden_res, key_added='cell_type')
-        adata.obs['leiden'] = adata.obs['cell_type']
+        adata.obs['leiden'] = adata.obs['cell_type'].astype(int)
     
-    adata.uns['counts_0_leiden'] = adata.obs['leiden'].cat.categories
+    adata.uns['counts_0_leiden'] = np.unique(adata.obs['leiden'])
+    adata.uns['counts_0_n_leiden'] = len(adata.uns['counts_0_leiden'])
+    adata.uns['centroid_x_min'] = adata.obs['x'].min()
+    adata.uns['centroid_x_max'] = adata.obs['x'].max()
+    adata.uns['centroid_y_min'] = adata.obs['y'].min()
+    adata.uns['centroid_y_max'] = adata.obs['y'].max()
+    adata.uns['n_genes'] = adata.var.shape[0]
+    
     print("Done~")
     print("="*30)
     return adata, cell_coords, tx_metadata
@@ -148,8 +164,7 @@ def import_data(cell_by_gene_counts: Union[str, pd.DataFrame],
 def calculate_mask_distance(adata: sc.AnnData,
                             cell_coords: gpd.GeoDataFrame,
                             max_centroid_dist: int=50,
-                            min_centroid_dist: int=0,
-                            re_cal_centroid_dist: bool=False) -> gpd.GeoDataFrame:
+                            min_centroid_dist: int=0) -> gpd.GeoDataFrame:
     """Calculate cell-cell distance based on their cell masks. The calculation is only done among 
     neighboring cells of different types. 
 
@@ -165,10 +180,6 @@ def calculate_mask_distance(adata: sc.AnnData,
         The threshold on cell-cell centroid distances under which we do not consider two cells being neighbors, by default 0
     cluster_col : str, optional
         Column name for cell clustering, by default 'leiden'
-    geometry_col : str, optional
-        Column name for the polygons, by default 'Geometry'
-    re_cal_centroid_dist : bool, optional
-        If centroid distances should be recorded, by default False
 
     Returns
     -------
@@ -190,97 +201,26 @@ def calculate_mask_distance(adata: sc.AnnData,
     # We further exclude cells from the same cell cluster
     # since we are only interested in comparing the transcript abundances among cells of different types 
     adj = adj.agg(lambda x: [
-            y for y in x.n if adata.obs.loc[y, ['leiden']]!=adata.obs.loc[x.name, ['leiden']]], axis=1)
+            y for y in x.n if adata.obs.loc[y, 'leiden']!=adata.obs.loc[x.name, 'leiden']], axis=1)
     # We then exclude cells surrounded by cells of its own type 
     adj_nonself = adj[adj.apply(len)>0]
     # Then we compute the cell-cell distance based on their masks
     adj_nonself_masks_ids = adj_nonself.explode()
     md = distance(
-        cell_coords.loc[adj_nonself_masks_ids.index, "Geometry"].values,
-        cell_coords.loc[adj_nonself_masks_ids.values, "Geometry"].values
+        cell_coords.loc[adj_nonself_masks_ids.index, "cell_boundary_geom"].values,
+        cell_coords.loc[adj_nonself_masks_ids.values, "cell_boundary_geom"].values
     )
     mask_distance = pd.DataFrame(
-        adj_nonself_masks_ids, columns=['neighbor_by_centroid'])
+        adj_nonself_masks_ids, columns=['neighbor_cell_id'])
     mask_distance['mask_distance'] = md
     mask_distance.reset_index(inplace=True)
-    mask_distance = mask_distance.merge(adata.obs[['x', 'y']], how='left', 
+    mask_distance = mask_distance.merge(adata.obs[['x', 'y', 'cell_centroid_geom']], how='left', 
                                         left_on='cell_id', right_index=True)
-    mask_distance = gpd.GeoDataFrame(mask_distance, 
-                                     geometry=gpd.points_from_xy(mask_distance.x, mask_distance.y))
-    mask_distance.rename_geometry("centroid_geom", inplace=True)
-    # recalculating the centroid distance is expnsive, so it should be avoided
-    if re_cal_centroid_dist:
-        v1 = adata.obs.loc[mask_distance.index, ['x','y']].values
-        v2 = adata.obs.loc[mask_distance.neighbor_by_centroid, ['x','y']].values
-        mask_distance['centroid_distance'] = np.sum((v1-v2)**2, axis=1)**0.5
+    # mask_distance = gpd.GeoDataFrame(mask_distance, 
+    #                                  geometry=gpd.points_from_xy(mask_distance.x, mask_distance.y))
+    # mask_distance.rename_geometry("centroid_geom", inplace=True)
     return mask_distance
 
-
-def annotate_tx_mask_distance(
-        adata: sc.AnnData,
-        tx_metadata: gpd.GeoDataFrame,
-        cell_coords: gpd.GeoDataFrame,
-        mask_distance: pd.DataFrame, 
-        mask_dist_cutoff: float=1, 
-        # x_col: str='x',
-        # y_col: str='y',
-        # gene_col: str='gene',
-        cell_col: str='cell_id',
-        tx_geom_col: str = 'point',
-        cell_geome_col: str='Geometry',
-        cluster_col: str='cell_type',
-        ) -> gpd.GeoDataFrame:
-    """Depending on the cell-cell distance computed based on cell masks, this function computes 
-    the distances of all the transcripts of a cell to all the neighboring cells 
-
-    Parameters
-    ----------
-    adata : sc.AnnData
-        The AnnData object containing cell metainformation
-    tx_metadata : gpd.GeoDataFrame
-        The detected transcripts
-    cell_coords : gpd.GeoDataFrame
-        The geodataframe recording the vertices of all the cells 
-    mask_distance : pd.DataFrame
-        The cell-cell distance based on cell masks 
-    mask_dist_cutoff : float, optional
-        The threshold of cell-cell distances beyond which a cell is no longer considered a neighbor, by default 1
-    x_col : str, optional
-        The column name for the x coordinate, by default 'global_x'
-    y_col : str, optional
-        The column name for the y coordinate, by default 'global_y'
-    cell_col : str, optional
-        The column name for cell id, by default 'cell_id'
-    gene_col : str, optional
-        The column name for gene names, by default 'gene'
-    cluster_col : str, optional
-        The column name for cell types, by default 'leiden'
-    geometry_col : str, optional
-        The column name for geometry, by default 'Geometry'
-
-    Returns
-    -------
-    gpd.GeoDataFrame
-        A dataframe containing the distances of all the transcripts to all the neighboring cells 
-    """
-    # Based on the cell-cell distance computed via cell masks 
-    # we find cells (interface cells) that are close to their neighbors (identified via cell centroids)
-    # Note that in computing the mask distance, we only included pairs 
-    # of cells that of different types 
-    interface = mask_distance[mask_distance.mask_distance<=mask_dist_cutoff]
-    valid_cells = interface[cell_col].unique()
-    # We extract transcripts of those interface cells 
-    intf_tx = tx_metadata[tx_metadata[cell_col].isin(valid_cells)]
-    # Then we compute the distance between transcript and cell mask of neighboring cell
-    intf_tx = intf_tx.merge(
-        interface[[cell_col,'neighbor_by_centroid','mask_distance']], on=cell_col, how='left')
-    intf_tx['mask_geom'] = cell_coords.loc[intf_tx.neighbor_by_centroid.values, cell_geome_col].values
-    intf_tx['tx_mask_distance'] = distance(intf_tx[tx_geom_col], intf_tx['mask_geom'])
-    intf_tx['cell_type'] = adata.obs.loc[intf_tx.cell_id, cluster_col].values
-    intf_tx['neighbor_celltype'] = adata.obs.loc[intf_tx.neighbor_by_centroid, cluster_col].values
-    intf_tx.sort_values('tx_mask_distance', inplace=True)
-    intf_tx = intf_tx.groupby(['molecule_id'], as_index=False).nth(0).reset_index(drop=True)
-    return intf_tx
 
 
 def extract_layer_num(layer: str) -> int:
@@ -332,8 +272,8 @@ def generate_count_patches(adata,
     # For removal, we for each cell count how many genes occured 
     cell_to_remove = tx_to_reassign.groupby(by=['cell_id', "gene"], as_index=False).size()
     # For addition, we for each cell in the neighbor count how many genes occured 
-    cell_to_add = tx_to_reassign.groupby(by=['neighbor_by_centroid', "gene"], as_index=False).size()
-    cell_to_add.rename(columns={"neighbor_by_centroid": "cell_id"}, inplace=True)
+    cell_to_add = tx_to_reassign.groupby(by=['neighbor_cell_id', "gene"], as_index=False).size()
+    cell_to_add.rename(columns={"neighbor_cell_id": "cell_id"}, inplace=True)
     # Transform the dataframe from long to wide 
     subtract_patch = pd.pivot(cell_to_remove, values="size", columns="gene", index='cell_id').fillna(0)
     add_patch = pd.pivot(cell_to_add, values="size", columns="gene", index='cell_id').fillna(0)
@@ -344,5 +284,14 @@ def generate_count_patches(adata,
     return counts_to_subtract, counts_to_add
 
 
+def sample_gumbel(shape, eps=1e-20):
+    U = torch.rand(shape)
+    return -torch.log(-torch.log(U + eps) + eps)
 
+def binary_gumbel_softmax_sample(logits, temperature):
+    y = logits + sample_gumbel(logits.size())
+    return torch.sigmoid(y / temperature)
 
+def multinomial_gumbel_softmax_sample(logits, temperature):
+    y = logits + sample_gumbel(logits.size())
+    return F.softmax(y / temperature, dim=-1)

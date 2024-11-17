@@ -1,0 +1,200 @@
+# Data IO
+import scanpy as sc
+import pandas as pd
+import numpy as np 
+import geopandas as gpd
+# Data manipulation 
+from itertools import combinations
+from pydeseq2.dds import DeseqDataSet
+from pydeseq2.default_inference import DefaultInference
+from pydeseq2.ds import DeseqStats
+from shapely import distance
+# Utility functions 
+from MisC.utility import annotate_tx_mask_distance
+
+
+def expression_feature(adata: sc.AnnData,
+                        layer: str,
+                        num_rep: int=3,
+                        method: str="split",
+                        n_cpus: int=8):
+    
+    aug_sample = adata.to_df(layer).copy()
+    aug_sample['leiden'] = adata.obs['leiden'].copy()
+    aug_sample.reset_index(drop=False, names=['cell_id'],inplace=True)
+    for l in adata.uns[layer+"_leiden"]:
+        temp = adata.to_df(layer).loc[adata.obs['leiden']!=l, :].copy()
+        temp['leiden'] = "cell_type_m_"+l
+        temp.reset_index(drop=False, names=['cell_id'],inplace=True)
+        aug_sample = pd.concat([aug_sample, temp], axis=0, join='inner', ignore_index=True)
+
+    counts_list = []
+    if method == "split":
+        rep_sample = aug_sample.groupby(['leiden'],
+                                        observed=True,
+                                        as_index=True).apply(lambda x: x.sample(frac=1, replace=False))
+        rep_sample.reset_index(drop=False, names=['leiden', 'cell_id'], inplace=True)
+        rep_sample.drop(columns=['cell_id'], inplace=True)
+        rep_counts = rep_sample.groupby("leiden", as_index=True).apply(lambda x: np.array_split(x, num_rep), include_groups=False)
+        for l in rep_counts.index:
+            for rep in range(num_rep):
+                temp = rep_counts[l][rep].sum(axis=0).to_frame().T
+                temp['leiden'] = l
+                counts_list.append(temp)
+    else:   
+        for _ in range(num_rep):
+            rep_sample = aug_sample.groupby(['leiden'],
+                                        observed=True,
+                                        as_index=True).apply(lambda x: x.sample(frac=1, replace=True))
+            rep_sample.reset_index(drop=False, names=['leiden', 'cell_id'], inplace=True)
+            rep_sample.drop(columns=['cell_id'], inplace=True)
+            rep_counts = rep_sample.groupby(by=['leiden'], observed=True, as_index=False).sum()
+            counts_list.append(rep_counts)
+    counts_df = pd.concat(counts_list, axis=0).reset_index(drop=True)    
+    counts_df["sample_id"] = "Sample"+counts_df.index.astype(str)
+    metadata = counts_df[["sample_id", "leiden"]].set_index("sample_id", inplace=False)
+    counts_df.drop(columns=['leiden'], inplace=True)
+    counts_df.set_index('sample_id', inplace=True)
+    inference = DefaultInference(n_cpus=n_cpus)
+    dds = DeseqDataSet(
+        counts=counts_df,
+        metadata=metadata,
+        design_factors="leiden",
+        refit_cooks=True,
+        inference=inference,
+    )
+    dds.deseq2()
+    
+    exp_1v1_list = []
+    for neighbor_celltype, celltype in combinations(adata.uns[layer+"_leiden"], 2):
+        stat_res = DeseqStats(dds, 
+                              inference=inference, 
+                              contrast=['leiden', neighbor_celltype, celltype],
+                              quiet=True)
+        stat_res.summary() 
+        exp_1v1_list.append([celltype, neighbor_celltype, 
+                         list(stat_res.results_df.index), 
+                         list(stat_res.results_df['log2FoldChange']),
+                         list(stat_res.results_df['padj'])])
+
+    exp_1v1_df0 = pd.DataFrame(exp_1v1_list, columns=["cell_type", 'neighbor_celltype',
+                                            'gene', 'log2FoldChange', 'padj']).reset_index(drop=True)
+    exp_1v1_df0 = exp_1v1_df0.explode(column=['gene', 'log2FoldChange', 'padj'])
+    exp_1v1_df0['padj'] = -np.log10(exp_1v1_df0['padj'].astype(float)+1e-7)
+    exp_1v1_df0['log2FoldChange'] = exp_1v1_df0['log2FoldChange'].astype(float)
+    
+    exp_1v1_df1 = exp_1v1_df0.copy()
+    exp_1v1_df1['cell_type'], exp_1v1_df1['neighbor_celltype'] = exp_1v1_df1['neighbor_celltype'], exp_1v1_df1['cell_type']
+    exp_1v1_df1['log2FoldChange'] *= -1
+    
+    exp_1v1_df = pd.concat([exp_1v1_df0, exp_1v1_df1], axis=0).reset_index(drop=True) 
+    
+    exp_1vR_list = []
+    for celltype in adata.uns[layer+"_leiden"]:
+        stat_res = DeseqStats(dds, 
+                              inference=inference, 
+                              contrast=['leiden', "cell_type_m_"+celltype, celltype],
+                              quiet=True)
+        stat_res.summary() 
+        exp_1vR_list.append([celltype, 
+                                list(stat_res.results_df.index), 
+                                list(stat_res.results_df['log2FoldChange']),
+                                list(stat_res.results_df['padj'])]) 
+    exp_1vR_df = pd.DataFrame(exp_1vR_list, columns=["cell_type", 'gene', 'log2FoldChange', 'padj']).reset_index(drop=True) 
+    exp_1vR_df = exp_1vR_df.explode(column=['gene', 'log2FoldChange', 'padj'])
+    exp_1vR_df['padj'] = -np.log10(exp_1vR_df['padj'].astype(float)+1e-7)
+    exp_1vR_df['log2FoldChange'] = exp_1vR_df['log2FoldChange'].astype(float)
+        
+    return exp_1v1_df, exp_1vR_df
+
+
+def annotate_tx_mask_distance(
+        adata: sc.AnnData,
+        tx_metadata: gpd.GeoDataFrame,
+        cell_coords: gpd.GeoDataFrame,
+        mask_distance: pd.DataFrame, 
+        mask_dist_cutoff: float=1, 
+        ) -> gpd.GeoDataFrame:
+    """Depending on the cell-cell distance computed based on cell masks, this function computes 
+    the distances of all the transcripts of a cell to all the neighboring cells 
+
+    Parameters
+    ----------
+    adata : sc.AnnData
+        The AnnData object containing cell metainformation
+    tx_metadata : gpd.GeoDataFrame
+        The detected transcripts
+    cell_coords : gpd.GeoDataFrame
+        The geodataframe recording the vertices of all the cells 
+    mask_distance : pd.DataFrame
+        The cell-cell distance based on cell masks 
+    mask_dist_cutoff : float, optional
+        The threshold of cell-cell distances beyond which a cell is no longer considered a neighbor, by default 1
+
+    Returns
+    -------
+    gpd.GeoDataFrame
+        A dataframe containing the distances of all the transcripts to all the neighboring cells 
+    """
+    # Based on the cell-cell distance computed via cell masks 
+    # we find cells (interface cells) that are close to their neighbors (identified via cell centroids)
+    # Note that in computing the mask distance, we only included pairs 
+    # of cells that of different types 
+    interface = mask_distance[mask_distance.mask_distance<=mask_dist_cutoff]
+    valid_cells = interface["cell_id"].unique()
+    # We extract transcripts of those interface cells 
+    intf_tx = tx_metadata[tx_metadata["cell_id"].isin(valid_cells)]
+    # Then we compute the distance between transcript and cell mask of neighboring cell
+    intf_tx = intf_tx.merge(
+        interface[["cell_id", 'neighbor_cell_id','mask_distance']], on="cell_id", how='left')
+    intf_tx['mask_geom'] = cell_coords.loc[intf_tx.neighbor_cell_id.values, "cell_boundary_geom"].values
+    intf_tx['tx_mask_distance'] = distance(intf_tx["tx_geom"], intf_tx['mask_geom'])
+    intf_tx['cell_type'] = adata.obs.loc[intf_tx.cell_id, "leiden"].values
+    intf_tx['neighbor_celltype'] = adata.obs.loc[intf_tx.neighbor_cell_id, "leiden"].values
+    intf_tx.sort_values('tx_mask_distance', inplace=True)
+    intf_tx = intf_tx.groupby(['molecule_id'], as_index=False).nth(0).reset_index(drop=True)
+    return intf_tx
+
+
+def distance_feature(adata: sc.AnnData, 
+                    tx_metadata: gpd.GeoDataFrame,
+                    cell_coords: gpd.GeoDataFrame,
+                    mask_distance: pd.DataFrame, 
+                    mask_dist_cutoff: float=1, ):
+    intf_tx = annotate_tx_mask_distance(adata=adata,
+                                        tx_metadata=tx_metadata,
+                                        cell_coords=cell_coords,
+                                        mask_distance=mask_distance, 
+                                        mask_dist_cutoff=mask_dist_cutoff)
+    intf_tx['self_centroid_distance'] = distance(intf_tx['point'], intf_tx['self_centroid_geom'])
+    intf_tx['neighbor_centroid_distance'] = distance(intf_tx['point'], intf_tx['neighbor_centroid_geom'])
+    intf_tx['distance_ratio'] = intf_tx['self_centroid_distance']/intf_tx['neighbor_centroid_distance']
+    intf_tx['distance_ratio'] = np.log2(intf_tx['distance_ratio']) 
+    
+    return intf_tx
+
+
+def generate_feature():
+    intf_tx = distance_feature(adata=adata,
+                               tx_metadata=tx_metadata,
+                               cell_coords=cell_coords,
+                               mask_distance=mask_distance,
+                               mask_dist_cutoff=mask_dist_cutoff)
+    
+    
+    exp_1v1_df, exp_1vR_df = expression_feature(adata=adata,
+                                       layer=layer,
+                                       num_rep=3,
+                                       method="split",
+                                       n_cpus=8)
+
+    intf_tx = intf_tx.merge(exp_1v1_df, how='left', 
+                            on=['cell_type', "neighbor_celltype", "gene"])
+        
+    intf_tx = intf_tx.merge(adata.obs[["cell_centroid_geom"]], how='left',
+              left_on="cell_id", right_index=True).rename(columns={"cell_centroid_geom": "self_centroid_geom"},
+                                                          inplace=False)
+              
+    intf_tx = intf_tx.merge(adata.obs[["centroid_geom"]], how='left',
+              left_on="neighbor_cell_id", right_index=True).rename(columns={"cell_centroid_geom": "neighbor_centroid_geom"},
+                                                          inplace=False) 
