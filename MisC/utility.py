@@ -141,11 +141,11 @@ def import_data(cell_by_gene_counts: Union[str, pd.DataFrame],
     if celltype_col is not None:
         print("Assigning pre-existing cell typing info from metadata.")
         adata.obs['cell_type'] = cell_meta.loc[adata.obs_names, celltype_col]
-        adata.obs['leiden'] = pd.factorize(cell_meta.loc[adata.obs_names, celltype_col])[0]
+        adata.obs['leiden'] = pd.factorize(cell_meta.loc[adata.obs_names, celltype_col])[0].astype(str)
     else:
         print("Performing Leiden clustering.")
         sc.tl.leiden(adata, resolution=leiden_res, key_added='cell_type')
-        adata.obs['leiden'] = adata.obs['cell_type'].astype(int)
+        adata.obs['leiden'] = adata.obs['cell_type'].astype(str)
     
     adata.uns['counts_0_leiden'] = np.unique(adata.obs['leiden'])
     adata.uns['counts_0_n_leiden'] = len(adata.uns['counts_0_leiden'])
@@ -210,12 +210,12 @@ def calculate_mask_distance(adata: sc.AnnData,
         cell_coords.loc[adj_nonself_masks_ids.index, "cell_boundary_geom"].values,
         cell_coords.loc[adj_nonself_masks_ids.values, "cell_boundary_geom"].values
     )
-    mask_distance = pd.DataFrame(
+    mask_distance = gpd.GeoDataFrame(
         adj_nonself_masks_ids, columns=['neighbor_cell_id'])
     mask_distance['mask_distance'] = md
     mask_distance.reset_index(inplace=True)
     mask_distance = mask_distance.merge(adata.obs[['x', 'y', 'cell_centroid_geom']], how='left', 
-                                        left_on='cell_id', right_index=True)
+                                        left_on='cell_id', right_index=True).set_geometry("cell_centroid_geom")
     # mask_distance = gpd.GeoDataFrame(mask_distance, 
     #                                  geometry=gpd.points_from_xy(mask_distance.x, mask_distance.y))
     # mask_distance.rename_geometry("centroid_geom", inplace=True)

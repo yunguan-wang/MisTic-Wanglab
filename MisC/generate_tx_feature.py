@@ -9,22 +9,44 @@ from pydeseq2.dds import DeseqDataSet
 from pydeseq2.default_inference import DefaultInference
 from pydeseq2.ds import DeseqStats
 from shapely import distance
-# Utility functions 
-from MisC.utility import annotate_tx_mask_distance
+# Typing 
+from typing import Tuple
 
 
 def expression_feature(adata: sc.AnnData,
                         layer: str,
                         num_rep: int=3,
                         method: str="split",
-                        n_cpus: int=8):
+                        n_cpus: int=8) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """Use deseq2 with pseudo bulks to perform differential analysis among different cell types and cell type vs all other cell types 
+
+    Parameters
+    ----------
+    adata : sc.AnnData
+        The AnnData object containing cell metainformation
+    layer : str
+        Name of the layer. It should be like counts_0, counts_1_proposed_update, etc
+    num_rep : int, optional
+        Number of repetitions in case of method='bootstrap' or number of chuns in case of method='split', by default 3
+    method : str, optional
+        The method to generate pseudo bulks, by default "split"
+    n_cpus : int, optional
+        Number of CPUs to be used for deseq2, by default 8
+
+    Returns
+    -------
+    Tuple[pd.DataFrame, pd.DataFrame]
+        Differential analysis results 
+    """
+    assert method in ['split', 'bootstrap'], "method has to be either split or bootstrap"
+    
     
     aug_sample = adata.to_df(layer).copy()
     aug_sample['leiden'] = adata.obs['leiden'].copy()
     aug_sample.reset_index(drop=False, names=['cell_id'],inplace=True)
     for l in adata.uns[layer+"_leiden"]:
         temp = adata.to_df(layer).loc[adata.obs['leiden']!=l, :].copy()
-        temp['leiden'] = "cell_type_m_"+l
+        temp['leiden'] = "cell_type_m_"+str(l)
         temp.reset_index(drop=False, names=['cell_id'],inplace=True)
         aug_sample = pd.concat([aug_sample, temp], axis=0, join='inner', ignore_index=True)
 
@@ -32,9 +54,10 @@ def expression_feature(adata: sc.AnnData,
     if method == "split":
         rep_sample = aug_sample.groupby(['leiden'],
                                         observed=True,
-                                        as_index=True).apply(lambda x: x.sample(frac=1, replace=False))
-        rep_sample.reset_index(drop=False, names=['leiden', 'cell_id'], inplace=True)
-        rep_sample.drop(columns=['cell_id'], inplace=True)
+                                        as_index=True).apply(lambda x: x.sample(frac=1, replace=False),
+                                                             include_groups=False)
+        rep_sample.reset_index(drop=False, names=['leiden', 'id_to_drop'], inplace=True)
+        rep_sample.drop(columns=['cell_id','id_to_drop'], inplace=True)
         rep_counts = rep_sample.groupby("leiden", as_index=True).apply(lambda x: np.array_split(x, num_rep), include_groups=False)
         for l in rep_counts.index:
             for rep in range(num_rep):
@@ -45,9 +68,10 @@ def expression_feature(adata: sc.AnnData,
         for _ in range(num_rep):
             rep_sample = aug_sample.groupby(['leiden'],
                                         observed=True,
-                                        as_index=True).apply(lambda x: x.sample(frac=1, replace=True))
-            rep_sample.reset_index(drop=False, names=['leiden', 'cell_id'], inplace=True)
-            rep_sample.drop(columns=['cell_id'], inplace=True)
+                                        as_index=True).apply(lambda x: x.sample(frac=1, replace=True),
+                                                             include_groups=False)
+            rep_sample.reset_index(drop=False, names=['leiden', 'id_to_drop'], inplace=True)
+            rep_sample.drop(columns=['cell_id','id_to_drop'], inplace=True)
             rep_counts = rep_sample.groupby(by=['leiden'], observed=True, as_index=False).sum()
             counts_list.append(rep_counts)
     counts_df = pd.concat(counts_list, axis=0).reset_index(drop=True)    
@@ -67,9 +91,12 @@ def expression_feature(adata: sc.AnnData,
     
     exp_1v1_list = []
     for neighbor_celltype, celltype in combinations(adata.uns[layer+"_leiden"], 2):
+        n_ct = neighbor_celltype.replace("_", "-")
+        ct = celltype.replace("_", "-")
+        
         stat_res = DeseqStats(dds, 
                               inference=inference, 
-                              contrast=['leiden', neighbor_celltype, celltype],
+                              contrast=['leiden', n_ct, ct],
                               quiet=True)
         stat_res.summary() 
         exp_1v1_list.append([celltype, neighbor_celltype, 
@@ -91,9 +118,10 @@ def expression_feature(adata: sc.AnnData,
     
     exp_1vR_list = []
     for celltype in adata.uns[layer+"_leiden"]:
+        ct = celltype.replace("_", "-")
         stat_res = DeseqStats(dds, 
                               inference=inference, 
-                              contrast=['leiden', "cell_type_m_"+celltype, celltype],
+                              contrast=['leiden', "cell-type-m-"+ct, ct],
                               quiet=True)
         stat_res.summary() 
         exp_1vR_list.append([celltype, 
@@ -108,15 +136,14 @@ def expression_feature(adata: sc.AnnData,
     return exp_1v1_df, exp_1vR_df
 
 
-def annotate_tx_mask_distance(
-        adata: sc.AnnData,
-        tx_metadata: gpd.GeoDataFrame,
-        cell_coords: gpd.GeoDataFrame,
-        mask_distance: pd.DataFrame, 
-        mask_dist_cutoff: float=1, 
-        ) -> gpd.GeoDataFrame:
+def distance_feature(adata: sc.AnnData,
+                    tx_metadata: gpd.GeoDataFrame,
+                    cell_coords: gpd.GeoDataFrame,
+                    mask_distance: pd.DataFrame, 
+                    mask_dist_cutoff: float=1) -> gpd.GeoDataFrame:
     """Depending on the cell-cell distance computed based on cell masks, this function computes 
-    the distances of all the transcripts of a cell to all the neighboring cells 
+    the distances of all the transcripts of a cell to the nearest neighboring cell and then computes 
+    the distance ratio 
 
     Parameters
     ----------
@@ -149,32 +176,65 @@ def annotate_tx_mask_distance(
         interface[["cell_id", 'neighbor_cell_id','mask_distance']], on="cell_id", how='left')
     intf_tx['mask_geom'] = cell_coords.loc[intf_tx.neighbor_cell_id.values, "cell_boundary_geom"].values
     intf_tx['tx_mask_distance'] = distance(intf_tx["tx_geom"], intf_tx['mask_geom'])
-    intf_tx['cell_type'] = adata.obs.loc[intf_tx.cell_id, "leiden"].values
-    intf_tx['neighbor_celltype'] = adata.obs.loc[intf_tx.neighbor_cell_id, "leiden"].values
+    # Get the nearest neighbor 
     intf_tx.sort_values('tx_mask_distance', inplace=True)
     intf_tx = intf_tx.groupby(['molecule_id'], as_index=False).nth(0).reset_index(drop=True)
-    return intf_tx
-
-
-def distance_feature(adata: sc.AnnData, 
-                    tx_metadata: gpd.GeoDataFrame,
-                    cell_coords: gpd.GeoDataFrame,
-                    mask_distance: pd.DataFrame, 
-                    mask_dist_cutoff: float=1, ):
-    intf_tx = annotate_tx_mask_distance(adata=adata,
-                                        tx_metadata=tx_metadata,
-                                        cell_coords=cell_coords,
-                                        mask_distance=mask_distance, 
-                                        mask_dist_cutoff=mask_dist_cutoff)
-    intf_tx['self_centroid_distance'] = distance(intf_tx['point'], intf_tx['self_centroid_geom'])
-    intf_tx['neighbor_centroid_distance'] = distance(intf_tx['point'], intf_tx['neighbor_centroid_geom'])
+    
+    intf_tx = intf_tx.merge(adata.obs[["leiden","cell_centroid_geom"]], how='left',
+                            left_on='cell_id', right_index=True).rename(columns={"leiden": "cell_type",
+                                                                                "cell_centroid_geom": "self_centroid_geom"},
+                                                                    inplace=False)
+    intf_tx = intf_tx.merge(adata.obs[["leiden","cell_centroid_geom"]], how='left',
+                            left_on='neighbor_cell_id', right_index=True).rename(columns={"leiden": "neighbor_celltype",
+                                                                                         "cell_centroid_geom": "neighbor_centroid_geom"},
+                                                                    inplace=False)
+    # Compute distance ratio
+    intf_tx['self_centroid_distance'] = distance(intf_tx['tx_geom'], intf_tx['self_centroid_geom'])
+    intf_tx['neighbor_centroid_distance'] = distance(intf_tx['tx_geom'], intf_tx['neighbor_centroid_geom'])
     intf_tx['distance_ratio'] = intf_tx['self_centroid_distance']/intf_tx['neighbor_centroid_distance']
     intf_tx['distance_ratio'] = np.log2(intf_tx['distance_ratio']) 
     
     return intf_tx
 
 
-def generate_feature():
+
+def generate_feature(adata: sc.AnnData,
+                    layer: str,
+                    tx_metadata: gpd.GeoDataFrame,
+                    cell_coords: gpd.GeoDataFrame,
+                    mask_distance: pd.DataFrame, 
+                    mask_dist_cutoff: float=1,
+                    num_rep: int=3,
+                    method: str="split",
+                    n_cpus: int=8) -> gpd.GeoDataFrame:
+    """A wrap up function for expression_feature and distance_feature 
+
+    Parameters
+    ----------
+    adata : sc.AnnData
+        The AnnData object containing cell metainformation
+    layer : str
+        Name of the layer. It should be like counts_0, counts_1_proposed_update, etc
+    tx_metadata : gpd.GeoDataFrame
+        The detected transcripts
+    cell_coords : gpd.GeoDataFrame
+        The geodataframe recording the vertices of all the cells 
+    mask_distance : pd.DataFrame
+        The cell-cell distance based on cell masks 
+    mask_dist_cutoff : float, optional
+        The threshold of cell-cell distances beyond which a cell is no longer considered a neighbor, by default 1
+    num_rep : int, optional
+        Number of repetitions in case of method='bootstrap' or number of chuns in case of method='split', by default 3
+    method : str, optional
+        The method to generate pseudo bulks, by default "split"
+    n_cpus : int, optional
+        Number of CPUs to be used for deseq2, by default 8
+    Returns
+    -------
+    gpd.GeoDataFrame
+        A dataframe containing information on the transcripts 
+    """
+    
     intf_tx = distance_feature(adata=adata,
                                tx_metadata=tx_metadata,
                                cell_coords=cell_coords,
@@ -184,17 +244,12 @@ def generate_feature():
     
     exp_1v1_df, exp_1vR_df = expression_feature(adata=adata,
                                        layer=layer,
-                                       num_rep=3,
-                                       method="split",
-                                       n_cpus=8)
+                                       num_rep=num_rep,
+                                       method=method,
+                                       n_cpus=n_cpus)
 
     intf_tx = intf_tx.merge(exp_1v1_df, how='left', 
                             on=['cell_type', "neighbor_celltype", "gene"])
-        
-    intf_tx = intf_tx.merge(adata.obs[["cell_centroid_geom"]], how='left',
-              left_on="cell_id", right_index=True).rename(columns={"cell_centroid_geom": "self_centroid_geom"},
-                                                          inplace=False)
-              
-    intf_tx = intf_tx.merge(adata.obs[["centroid_geom"]], how='left',
-              left_on="neighbor_cell_id", right_index=True).rename(columns={"cell_centroid_geom": "neighbor_centroid_geom"},
-                                                          inplace=False) 
+    
+    return intf_tx 
+    
