@@ -48,36 +48,7 @@ def propose_reassignment(adata: sc.AnnData,
     """
     #TODO: Add a progress bar
     print('Identifying transcripts that need to be reassigned...')
-    # intf_tx = annotate_tx_mask_distance(adata=adata,
-    #                                     tx_metadata=tx_metadata,
-    #                                     cell_coords=cell_coords,
-    #                                     mask_distance=mask_distance, 
-    #                                     mask_dist_cutoff=mask_dist_cutoff)
-    # The basic logic for reassigning transcript is based on the difference of the 
-    # expressed transcripts between two types of cells 
-    # intf_tx = distance_feature(adata=adata,
-    #                            tx_metadata=tx_metadata,
-    #                            cell_coords=cell_coords,
-    #                            mask_distance=mask_distance,
-    #                            mask_dist_cutoff=mask_dist_cutoff)
     
-    
-    # exp_1v1_df, exp_1vR_df = expression_feature(adata=adata,
-    #                                    layer=layer,
-    #                                    num_rep=3,
-    #                                    method="split",
-    #                                    n_cpus=8)
-
-    # intf_tx = intf_tx.merge(exp_1v1_df, how='left', 
-    #                         on=['cell_type', "neighbor_celltype", "gene"])
-        
-    # intf_tx = intf_tx.merge(adata.obs[["cell_centroid_geom"]], how='left',
-    #           left_on="cell_id", right_index=True).rename(columns={"cell_centroid_geom": "self_centroid_geom"},
-    #                                                       inplace=False)
-              
-    # intf_tx = intf_tx.merge(adata.obs[["centroid_geom"]], how='left',
-    #           left_on="neighbor_cell_id", right_index=True).rename(columns={"cell_centroid_geom": "neighbor_centroid_geom"},
-    #                                                       inplace=False)
     
     
     

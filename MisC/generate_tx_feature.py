@@ -40,7 +40,9 @@ def expression_feature(adata: sc.AnnData,
     """
     assert method in ['split', 'bootstrap'], "method has to be either split or bootstrap"
     
-    
+    # To prepare for one-vs-rest comparison, we first construct an augmented dataframe 
+    # where the trailing samples are just the original counts that belong to 
+    # all the cells except for one type 
     aug_sample = adata.to_df(layer).copy()
     aug_sample['leiden'] = adata.obs['leiden'].copy()
     aug_sample.reset_index(drop=False, names=['cell_id'],inplace=True)
@@ -49,22 +51,27 @@ def expression_feature(adata: sc.AnnData,
         temp['leiden'] = "cell_type_m_"+str(l)
         temp.reset_index(drop=False, names=['cell_id'],inplace=True)
         aug_sample = pd.concat([aug_sample, temp], axis=0, join='inner', ignore_index=True)
-
+        
     counts_list = []
+    # If the method is split, we will split per each cell type into num_rep nonoverlaping chunks 
     if method == "split":
+        # Shuffle the data 
         rep_sample = aug_sample.groupby(['leiden'],
                                         observed=True,
                                         as_index=True).apply(lambda x: x.sample(frac=1, replace=False),
                                                              include_groups=False)
+        # The dataframe should only have counts and leiden 
         rep_sample.reset_index(drop=False, names=['leiden', 'id_to_drop'], inplace=True)
         rep_sample.drop(columns=['cell_id','id_to_drop'], inplace=True)
         rep_counts = rep_sample.groupby("leiden", as_index=True).apply(lambda x: np.array_split(x, num_rep), include_groups=False)
+        # Construct pseudo bulk by summing up the counts 
         for l in rep_counts.index:
             for rep in range(num_rep):
                 temp = rep_counts[l][rep].sum(axis=0).to_frame().T
                 temp['leiden'] = l
                 counts_list.append(temp)
     else:   
+        # If the method is bootstrap, we simply resample the data with replacement num_rep times 
         for _ in range(num_rep):
             rep_sample = aug_sample.groupby(['leiden'],
                                         observed=True,
@@ -72,13 +79,17 @@ def expression_feature(adata: sc.AnnData,
                                                              include_groups=False)
             rep_sample.reset_index(drop=False, names=['leiden', 'id_to_drop'], inplace=True)
             rep_sample.drop(columns=['cell_id','id_to_drop'], inplace=True)
+            # Construct pseudo bulks 
             rep_counts = rep_sample.groupby(by=['leiden'], observed=True, as_index=False).sum()
             counts_list.append(rep_counts)
+    # Concatnate list to a dataframe and use the index as "sample" id
     counts_df = pd.concat(counts_list, axis=0).reset_index(drop=True)    
     counts_df["sample_id"] = "Sample"+counts_df.index.astype(str)
+    # Treat leiden as different "conditions"
     metadata = counts_df[["sample_id", "leiden"]].set_index("sample_id", inplace=False)
     counts_df.drop(columns=['leiden'], inplace=True)
     counts_df.set_index('sample_id', inplace=True)
+    # Deseq2
     inference = DefaultInference(n_cpus=n_cpus)
     dds = DeseqDataSet(
         counts=counts_df,
@@ -88,36 +99,39 @@ def expression_feature(adata: sc.AnnData,
         inference=inference,
     )
     dds.deseq2()
-    
+    # For one-vs-one comparison 
     exp_1v1_list = []
     for neighbor_celltype, celltype in combinations(adata.uns[layer+"_leiden"], 2):
+        # Since deseq2 will replace _ with -
         n_ct = neighbor_celltype.replace("_", "-")
         ct = celltype.replace("_", "-")
-        
+        # Use contrast to estimate log2FC and padj
         stat_res = DeseqStats(dds, 
                               inference=inference, 
                               contrast=['leiden', n_ct, ct],
                               quiet=True)
         stat_res.summary() 
         exp_1v1_list.append([celltype, neighbor_celltype, 
-                         list(stat_res.results_df.index), 
+                         list(stat_res.results_df.index), # Genes
                          list(stat_res.results_df['log2FoldChange']),
                          list(stat_res.results_df['padj'])])
-
+    # Convert to dataframe and compute -log10(p)
     exp_1v1_df0 = pd.DataFrame(exp_1v1_list, columns=["cell_type", 'neighbor_celltype',
                                             'gene', 'log2FoldChange', 'padj']).reset_index(drop=True)
     exp_1v1_df0 = exp_1v1_df0.explode(column=['gene', 'log2FoldChange', 'padj'])
     exp_1v1_df0['padj'] = -np.log10(exp_1v1_df0['padj'].astype(float)+1e-7)
     exp_1v1_df0['log2FoldChange'] = exp_1v1_df0['log2FoldChange'].astype(float)
-    
+    # Want both neighbor - self and self - neighbor 
     exp_1v1_df1 = exp_1v1_df0.copy()
     exp_1v1_df1['cell_type'], exp_1v1_df1['neighbor_celltype'] = exp_1v1_df1['neighbor_celltype'], exp_1v1_df1['cell_type']
     exp_1v1_df1['log2FoldChange'] *= -1
-    
+    # Concatenate dataframes 
     exp_1v1_df = pd.concat([exp_1v1_df0, exp_1v1_df1], axis=0).reset_index(drop=True) 
     
+    # One-vs-rest comparison 
     exp_1vR_list = []
     for celltype in adata.uns[layer+"_leiden"]:
+        # Since deseq2 will replace _ with -
         ct = celltype.replace("_", "-")
         stat_res = DeseqStats(dds, 
                               inference=inference, 
@@ -128,11 +142,12 @@ def expression_feature(adata: sc.AnnData,
                                 list(stat_res.results_df.index), 
                                 list(stat_res.results_df['log2FoldChange']),
                                 list(stat_res.results_df['padj'])]) 
+    # Convert to dataframe and compute -log10(p)
     exp_1vR_df = pd.DataFrame(exp_1vR_list, columns=["cell_type", 'gene', 'log2FoldChange', 'padj']).reset_index(drop=True) 
     exp_1vR_df = exp_1vR_df.explode(column=['gene', 'log2FoldChange', 'padj'])
     exp_1vR_df['padj'] = -np.log10(exp_1vR_df['padj'].astype(float)+1e-7)
     exp_1vR_df['log2FoldChange'] = exp_1vR_df['log2FoldChange'].astype(float)
-        
+
     return exp_1v1_df, exp_1vR_df
 
 
@@ -234,22 +249,30 @@ def generate_feature(adata: sc.AnnData,
     gpd.GeoDataFrame
         A dataframe containing information on the transcripts 
     """
-    
+    # Features based on distance 
     intf_tx = distance_feature(adata=adata,
                                tx_metadata=tx_metadata,
                                cell_coords=cell_coords,
                                mask_distance=mask_distance,
                                mask_dist_cutoff=mask_dist_cutoff)
-    
-    
+    # Features based on differential analysis 
     exp_1v1_df, exp_1vR_df = expression_feature(adata=adata,
-                                       layer=layer,
-                                       num_rep=num_rep,
-                                       method=method,
-                                       n_cpus=n_cpus)
-
+                                                layer=layer,
+                                                num_rep=num_rep,
+                                                method=method,
+                                                n_cpus=n_cpus)
+    # Combine the two piceces of information 
     intf_tx = intf_tx.merge(exp_1v1_df, how='left', 
                             on=['cell_type', "neighbor_celltype", "gene"])
+    intf_tx.rename(columns={"log2FoldChange": "neighbor_self_log2FoldChange",
+                            "padj": "neighbor_self_padj"}, inplace=True)
+    intf_tx = intf_tx.merge(exp_1vR_df, how='left',
+                            on=['cell_type', "gene"])
+    intf_tx.rename(columns={"log2FoldChange": "rest_self_log2FoldChange",
+                            "padj": "rest_self_padj"}, inplace=True)
+    # Combine fc and p so that if fc is large and -log10(p) is large it's more likely to be reassigned 
+    intf_tx['neighbor_self_exp_feature'] = intf_tx['neighbor_self_log2FoldChange'] * intf_tx['neighbor_self_padj']
+    intf_tx['rest_self_exp_feature'] = intf_tx['rest_self_log2FoldChange'] * intf_tx['rest_self_padj']
     
     return intf_tx 
     

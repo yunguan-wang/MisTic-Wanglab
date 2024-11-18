@@ -284,8 +284,10 @@ def generate_count_patches(adata,
     return counts_to_subtract, counts_to_add
 
 
-def sample_gumbel(shape, eps=1e-20):
-    U = torch.rand(shape)
+def sample_gumbel(shape, 
+                  model_device: torch.device,
+                  eps=1e-20):
+    U = torch.rand(shape).to(model_device)
     return -torch.log(-torch.log(U + eps) + eps)
 
 def binary_gumbel_softmax_sample(logits, temperature):
