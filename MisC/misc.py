@@ -13,13 +13,11 @@ import torch.nn.functional as F
 from geopandas import GeoDataFrame  
 from shapely import Polygon
 # Utility function 
-from MisC.utility import import_data, calculate_mask_distance, binary_gumbel_softmax_sample, extract_layer_num, mask_eval
+from MisC.utility import import_data, calculate_mask_distance, binary_gumbel_softmax_sample, extract_layer_num, mask_eval, make_reassignment
 from MisC.generate_tx_feature import generate_feature
 from MisC.data_loader import generate_patch_coords, load_patch
-from MisC.transcript_reassign import propose_reassignment, test_proposed_reassignment, make_reassignment
 # Typing 
 from typing import Tuple, Union, Optional 
-
 
 
 class misc(nn.Module):
@@ -43,25 +41,25 @@ class misc(nn.Module):
         
         # Record parameters 
         self.import_data_par = {
-            cell_centroid_x_col: cell_centroid_x_col,
-            cell_centroid_y_col: cell_centroid_y_col,
-            tx_x_col: tx_x_col,
-            tx_y_col: tx_y_col,
-            gene_col: gene_col,
-            cell_col: cell_col,
-            celltype_col: celltype_col,
-            leiden_res: leiden_res,
-            preprocess: preprocess
+            'cell_centroid_x_col': cell_centroid_x_col,
+            'cell_centroid_y_col': cell_centroid_y_col,
+            'tx_x_col': tx_x_col,
+            'tx_y_col': tx_y_col,
+            'gene_col': gene_col,
+            'cell_col': cell_col,
+            'celltype_col': celltype_col,
+            'leiden_res': leiden_res,
+            'preprocess': preprocess
         }
         self.calculate_mask_distance_par = {
-            max_centroid_dist: max_centroid_dist,
-            min_centroid_dist: min_centroid_dist
+            'max_centroid_dist': max_centroid_dist,
+            'min_centroid_dist': min_centroid_dist
         }
         self.generate_feature_par = {
-            mask_dist_cutoff: mask_dist_cutoff,
-            num_rep: num_rep,
-            method: method,
-            n_cpus: n_cpus
+            'mask_dist_cutoff': mask_dist_cutoff,
+            'num_rep': num_rep,
+            'method': method,
+            'n_cpus': n_cpus
         }
         
         # Create data 
@@ -72,6 +70,13 @@ class misc(nn.Module):
         self.mask_distance = None
         self.intf_tx = None
         self.coord_list = None
+        
+        # Parameers for training 
+        self.init_temperature = 1.0
+        self.min_temperature = 0.5
+        self.current_temperature = self.init_temperature
+        self.ANNEAL_RATE = 0.00003
+        self.log_interval = 10
         
         # Create parameters 
         self.model_device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
@@ -85,29 +90,23 @@ class misc(nn.Module):
                     cell_metadata: Union[str, pd.DataFrame],
                     cell_boundary_polygons: Union[str, gpd.GeoDataFrame],
                     detected_transcripts: Union[str, pd.DataFrame, gpd.GeoDataFrame]) -> None:
+        print("Importing data... This could take a while. But you already know what we are dealing with...")
         self.adata, self.cell_coords, self.tx_metadata = import_data(cell_by_gene_counts=cell_by_gene_counts,
                                                                       cell_metadata=cell_metadata,
                                                                       cell_boundary_polygons=cell_boundary_polygons,
                                                                       detected_transcripts=detected_transcripts,
                                                                       **self.import_data_par)
-        
+        print("Computing mask distances... Keep in mind, patience is a virtue...")
         self.mask_distance = calculate_mask_distance(adata=self.adata,
                                                       cell_coords=self.cell_coords,
                                                       **self.calculate_mask_distance_par)
-
+        print("Generating features for detected transcripts... Whatever, are we there yet...")
         self.intf_tx = generate_feature(adata=self.adata,
                                         layer=self.current_layer,
                                         tx_metadata=self.tx_metadata,
                                         cell_coords=self.cell_coords,
                                         mask_distance=self.mask_distance,
                                         **self.generate_feature_par)
-        
-        self.reassign_coefficients = nn.Linear(in_features=3, out_features=1, bias=True)
-        self.cell_type_coefficients = nn.Linear(in_features=self.adata.uns['n_genes'], 
-                                                out_features=self.adata.uns['counts_0_n_leiden'],
-                                                bias=True)
-        
-        self.optimizer = optim.Adam(self.parameters(), lr=1e-3)
         
     def patchfy_data(self,
                     half_patch_size_x,
@@ -120,13 +119,22 @@ class misc(nn.Module):
                                                 n_patches_x=n_patches_x,
                                                 n_patches_y=n_patches_y) 
     
+    def initiate_parameters(self) -> None:
+        self.reassign_coefficients = nn.Linear(in_features=3, out_features=1, bias=True)
+        self.cell_type_coefficients = nn.Linear(in_features=self.adata.uns['n_genes'], 
+                                                out_features=self.adata.uns['counts_0_n_leiden'],
+                                                bias=True)
+        
+        self.optimizer = optim.Adam(self.parameters(), lr=1e-3)
+    
     def encode(self, 
                tx_features: torch.tensor,
                temperature: float):
         reassign_logits = self.reassign_coefficients(tx_features) 
         reassign_probs = binary_gumbel_softmax_sample(logits=reassign_logits,
-                                                        temperature=temperature)
-        reassign_hard = torch.round(reassign_probs, deccimals=0)
+                                                        temperature=temperature,
+                                                        model_device=self.model_device)
+        reassign_hard = torch.round(reassign_probs, decimals=0)
         reassign_hard = (reassign_hard - reassign_probs).detach() + reassign_probs
         
         return reassign_hard, reassign_probs
@@ -175,31 +183,29 @@ class misc(nn.Module):
         # Assume a priori equal probability
         log_ratio = torch.log(reassign_probs*2+1e-20)
         KLD = torch.sum(reassign_probs * log_ratio, dim=-1).sum()
+        # Can add an entropy term but let's first sit on this idea for a while 
+        # entropy = 0.0
         return CEl + KLD    
     
-    def train(self,
-              n_epochs):
+    def training_loop(self,
+                      n_epochs):
         self.train()
-        temperature = 1.0
-        temp_min = 0.5
-        ANNEAL_RATE = 0.00003
-        log_interval = 10
         for epoch in range(n_epochs):
             np.random.shuffle(self.coord_list)
-            temp = temperature
             train_loss = 0.0
             for minibatch_ind, coord in enumerate(self.coord_list):
                 cell_by_gene_counts, tx_features, cell_type_labels, row_index_self, row_index_neighbor, col_index = load_patch(adata=self.adata,
                                                                                                                                 intf_tx=self.intf_tx,
                                                                                                                                 coord_tuple=coord,
-                                                                                                                                layer=self.current_layer)
-                self.optimizer.zero_grad()
+                                                                                                                                layer=self.current_layer,
+                                                                                                                                model_device=self.model_device)
                 reassign_probs, cell_type_logits = self(tx_features=tx_features, 
                                                         cell_by_gene_counts=cell_by_gene_counts, 
                                                         row_index_self=row_index_self,
                                                         row_index_neighbor=row_index_neighbor,
                                                         col_index=col_index,
-                                                        temperature=temp)
+                                                        temperature=self.current_temperature)
+                self.optimizer.zero_grad()
                 loss = self.loss_function(cell_type_logits=cell_type_logits,
                                           cell_type_labels=cell_type_labels,
                                           reassign_probs=reassign_probs)
@@ -207,9 +213,9 @@ class misc(nn.Module):
                 train_loss += loss.item()
                 self.optimizer.step()
                 if minibatch_ind % 100 == 1:
-                    temp = np.maximum(temp * np.exp(-ANNEAL_RATE * minibatch_ind), temp_min) 
+                    self.current_temperature = np.maximum(self.current_temperature * np.exp(-self.ANNEAL_RATE * minibatch_ind), self.min_temperature) 
 
-                if minibatch_ind % log_interval == 0:
+                if minibatch_ind % self.log_interval == 0:
                     print('Train Epoch: {} [{}/{} ({:.0f}%)]tLoss: {:.6f}'.format(
                             epoch, minibatch_ind, len(self.coord_list),
                                 100. * minibatch_ind / len(self.coord_list),
@@ -217,34 +223,31 @@ class misc(nn.Module):
             print('====> Epoch: {} Average loss: {:.4f}'.format(
                     epoch, train_loss / len(self.coord_list)))
 
+    def reassign_tx(self,
+                    select_method: Union[str, float]) -> None:
+        with torch.no_grad():
+            self.eval()
+            tx_features = torch.tensor(self.intf_tx[['distance_ratio', 
+                                         "neighbor_self_exp_feature", 
+                                         "rest_self_exp_feature"]].values, 
+                               dtype=torch.float32, device=self.model_device)  
+            reassign_hard, reassign_probs = self.encode(tx_features=tx_features,
+                                                        temperature=self.current_temperature)
+            if isinstance(select_method, str):
+                self.intf_tx['reassign'] = (reassign_hard.squeeze(1).numpy()) 
+            else:
+                self.intf_tx['reassign'] = (reassign_probs.squeeze(1).numpy()>select_method) 
 
-
+            tx_to_reassign = self.intf_tx.loc[self.intf_tx['reassign']==1, 
+                                              ['molecule_id', 'cell_id', 'neighbor_cell_id', "gene"]]
     
-    def _reassign_tx(self) -> None:
-        counts_to_subtract, counts_to_add, tx_to_reassign = propose_reassignment(
-            adata=self.adata, 
-            tx_metadata=self.tx_metadata,
-            cell_coords=self.cell_coords,
-            layer=self.current_layer,
-            mask_distance=self.mask_distance)
-        test_result = test_proposed_reassignment(
-            adata=self.adata,
-            layer=self.current_layer,
-            counts_to_subtract=counts_to_subtract,
-            counts_to_add=counts_to_add)
-        self.adata, self.tx_metadata = make_reassignment(
-            adata=self.adata,
-            layer=self.current_layer,
-            tx_metadata=self.tx_metadata,
-            tx_to_reassign=tx_to_reassign,
-            test_result=test_result)
-    
-    def reassign_tx(self, n_iter: int) -> None:
-        for _ in range(n_iter):
-            self._reassign_tx()
+            self.adata, self.tx_metadata = make_reassignment(adata=self.adata,
+                                                             layer=self.current_layer,
+                                                             tx_metadata=self.tx_metadata,
+                                                             tx_to_reassign=tx_to_reassign)
             layer_num = extract_layer_num(self.current_layer)
             self.current_layer = "counts_"+str(int(layer_num+1))
-    
+
     ###########
     # Do not run just copied and pasted        
     @classmethod 

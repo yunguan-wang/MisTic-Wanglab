@@ -9,6 +9,8 @@ from pydeseq2.dds import DeseqDataSet
 from pydeseq2.default_inference import DefaultInference
 from pydeseq2.ds import DeseqStats
 from shapely import distance
+# User entertainment
+from tqdm.auto import tqdm
 # Typing 
 from typing import Tuple
 
@@ -46,7 +48,7 @@ def expression_feature(adata: sc.AnnData,
     aug_sample = adata.to_df(layer).copy()
     aug_sample['leiden'] = adata.obs['leiden'].copy()
     aug_sample.reset_index(drop=False, names=['cell_id'],inplace=True)
-    for l in adata.uns[layer+"_leiden"]:
+    for l in tqdm(adata.uns[layer+"_leiden"], desc="Augmenting sample"):
         temp = adata.to_df(layer).loc[adata.obs['leiden']!=l, :].copy()
         temp['leiden'] = "cell_type_m_"+str(l)
         temp.reset_index(drop=False, names=['cell_id'],inplace=True)
@@ -99,9 +101,10 @@ def expression_feature(adata: sc.AnnData,
         inference=inference,
     )
     dds.deseq2()
-    # For one-vs-one comparison 
+    print("Performing one-vs-one differential analysis...")
     exp_1v1_list = []
-    for neighbor_celltype, celltype in combinations(adata.uns[layer+"_leiden"], 2):
+    for neighbor_celltype, celltype in tqdm(combinations(adata.uns[layer+"_leiden"], 2), 
+                                            total=(adata.uns[layer+"_n_leiden"] * (adata.uns[layer+"_n_leiden"]+1))/2):
         # Since deseq2 will replace _ with -
         n_ct = neighbor_celltype.replace("_", "-")
         ct = celltype.replace("_", "-")
@@ -111,6 +114,10 @@ def expression_feature(adata: sc.AnnData,
                               contrast=['leiden', n_ct, ct],
                               quiet=True)
         stat_res.summary() 
+        if np.any(np.isnan(stat_res.results_df['pvalue'])) or np.any(np.isnan(stat_res.results_df['padj'])):
+            print("When comparing {} to {}, some pvalues/padjs are NaN. We will fill it with 1.".format(neighbor_celltype, celltype))
+            stat_res.results_df['pvalue'].fillna(1.0, inplace=True)
+            stat_res.results_df['padj'].fillna(1.0, inplace=True)
         exp_1v1_list.append([celltype, neighbor_celltype, 
                          list(stat_res.results_df.index), # Genes
                          list(stat_res.results_df['log2FoldChange']),
@@ -128,9 +135,9 @@ def expression_feature(adata: sc.AnnData,
     # Concatenate dataframes 
     exp_1v1_df = pd.concat([exp_1v1_df0, exp_1v1_df1], axis=0).reset_index(drop=True) 
     
-    # One-vs-rest comparison 
+    print("Performing one-vs-rest differential analysis...")
     exp_1vR_list = []
-    for celltype in adata.uns[layer+"_leiden"]:
+    for celltype in tqdm(adata.uns[layer+"_leiden"]):
         # Since deseq2 will replace _ with -
         ct = celltype.replace("_", "-")
         stat_res = DeseqStats(dds, 
@@ -138,6 +145,10 @@ def expression_feature(adata: sc.AnnData,
                               contrast=['leiden', "cell-type-m-"+ct, ct],
                               quiet=True)
         stat_res.summary() 
+        if np.any(np.isnan(stat_res.results_df['pvalue'])) or np.any(np.isnan(stat_res.results_df['padj'])):
+            print("When comparing rest to {}, some pvalues/padjs are NaN. We will fill it with 1.".format(celltype))
+            stat_res.results_df['pvalue'].fillna(1.0, inplace=True)
+            stat_res.results_df['padj'].fillna(1.0, inplace=True)
         exp_1vR_list.append([celltype, 
                                 list(stat_res.results_df.index), 
                                 list(stat_res.results_df['log2FoldChange']),
@@ -187,6 +198,7 @@ def distance_feature(adata: sc.AnnData,
     # We extract transcripts of those interface cells 
     intf_tx = tx_metadata[tx_metadata["cell_id"].isin(valid_cells)]
     # Then we compute the distance between transcript and cell mask of neighboring cell
+    print("Computing distances among transcripts and neighboring cells...")
     intf_tx = intf_tx.merge(
         interface[["cell_id", 'neighbor_cell_id','mask_distance']], on="cell_id", how='left')
     intf_tx['mask_geom'] = cell_coords.loc[intf_tx.neighbor_cell_id.values, "cell_boundary_geom"].values

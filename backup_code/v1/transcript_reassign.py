@@ -1,5 +1,5 @@
 # Data IO 
-from tqdm import tqdm
+from tqdm.auto import tqdm
 import pandas as pd
 import scanpy as sc
 import geopandas as gpd
@@ -14,57 +14,57 @@ from MisC.utility import  extract_layer_num, generate_count_patches
 from typing import Tuple, Optional 
 
 
-def propose_reassignment(adata: sc.AnnData, 
-                         tx_metadata: gpd.GeoDataFrame,
-                         cell_coords: gpd.GeoDataFrame,
-                         layer: str, 
-                         mask_distance: pd.DataFrame, 
-                         mask_dist_cutoff: float=1) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    """Generate updates to the cell-by-gene counts matrix and the transcript matrix 
+# def propose_reassignment(adata: sc.AnnData, 
+#                          tx_metadata: gpd.GeoDataFrame,
+#                          cell_coords: gpd.GeoDataFrame,
+#                          layer: str, 
+#                          mask_distance: pd.DataFrame, 
+#                          mask_dist_cutoff: float=1) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+#     """Generate updates to the cell-by-gene counts matrix and the transcript matrix 
 
-    Parameters
-    ----------
-    adata : sc.AnnData
-        The AnnData object containing cell metainformation
-    tx_metadata : gpd.GeoDataFrame
-        The detected transcripts
-    cell_coords : gpd.GeoDataFrame
-        The geodataframe recording the vertices of all the cells 
-    layer : str
-        The layer upon which the update is computed 
-    mask_distance: pd.DataFrame
-        A dataframe where each row is a pair of neighboring cells as well as their distance information 
-    mask_dist_cutoff : float, optional
-        The threshold of cell-cell distances beyond which a cell is no longer considered a neighbor, by default 1
+#     Parameters
+#     ----------
+#     adata : sc.AnnData
+#         The AnnData object containing cell metainformation
+#     tx_metadata : gpd.GeoDataFrame
+#         The detected transcripts
+#     cell_coords : gpd.GeoDataFrame
+#         The geodataframe recording the vertices of all the cells 
+#     layer : str
+#         The layer upon which the update is computed 
+#     mask_distance: pd.DataFrame
+#         A dataframe where each row is a pair of neighboring cells as well as their distance information 
+#     mask_dist_cutoff : float, optional
+#         The threshold of cell-cell distances beyond which a cell is no longer considered a neighbor, by default 1
 
-    Returns
-    -------
-    Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]
-        Updates to counts and transcript matrices. The first two dataframes are "patches" to the current 
-        count matrix. The first one is the number of transcripts that should be subtracted from the count while 
-        the second one is the number of transcripts to be added to the count. 
-        The last two dataframes are "patches" for actual transcript reassignment. The first one shows which 
-        transcript should be reassigned to which cell type while the second one records the original assignment.  
-    """
-    #TODO: Add a progress bar
-    print('Identifying transcripts that need to be reassigned...')
+#     Returns
+#     -------
+#     Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]
+#         Updates to counts and transcript matrices. The first two dataframes are "patches" to the current 
+#         count matrix. The first one is the number of transcripts that should be subtracted from the count while 
+#         the second one is the number of transcripts to be added to the count. 
+#         The last two dataframes are "patches" for actual transcript reassignment. The first one shows which 
+#         transcript should be reassigned to which cell type while the second one records the original assignment.  
+#     """
+#     #TODO: Add a progress bar
+#     # print('Identifying transcripts that need to be reassigned...')
     
     
     
     
-    intf_tx['reassign_logit'] = intf_tx['distance_ratio'] + intf_tx['log2FoldChange'] * intf_tx['padj']
+#     # intf_tx['reassign_logit'] = intf_tx['distance_ratio'] + intf_tx['log2FoldChange'] * intf_tx['padj']
     
-    intf_tx["reassign_prob"] = 1/(1+np.exp(-intf_tx['reassign_logit']))
-    intf_tx['reassign'] = (intf_tx['reassign_prob']>0.9)
+#     # intf_tx["reassign_prob"] = 1/(1+np.exp(-intf_tx['reassign_logit']))
+#     # intf_tx['reassign'] = (intf_tx['reassign_prob']>0.9)
     
-    tx_to_reassign = intf_tx.loc[intf_tx['reassign']==1, ['molecule_id', 'cell_id', 'neighbor_by_centroid', "gene"]]
+#     # tx_to_reassign = intf_tx.loc[intf_tx['reassign']==1, ['molecule_id', 'cell_id', 'neighbor_by_centroid', "gene"]]
     
-    counts_to_subtract, counts_to_add = generate_count_patches(adata=adata,
-                                                               tx_to_reassign=tx_to_reassign)
+#     # counts_to_subtract, counts_to_add = generate_count_patches(adata=adata,
+#     #                                                            tx_to_reassign=tx_to_reassign)
     
 
-    return counts_to_subtract, counts_to_add, tx_to_reassign
-            
+#     # return counts_to_subtract, counts_to_add, tx_to_reassign
+#     pass         
 
 
 def test_proposed_reassignment(adata: sc.AnnData,
@@ -140,10 +140,8 @@ def test_proposed_reassignment(adata: sc.AnnData,
 def make_reassignment(adata: sc.AnnData,
                       layer: str,
                       tx_metadata: gpd.GeoDataFrame,
-                    #   tx_assignment_addition: pd.DataFrame, 
-                    #   tx_assignment_removal: pd.DataFrame,
                       tx_to_reassign: pd.DataFrame,
-                      test_result: dict) -> Tuple[sc.AnnData, gpd.GeoDataFrame]:
+                      test_result: Optional[dict]=None) -> Tuple[sc.AnnData, gpd.GeoDataFrame]:
     """Given the testing results, this function makes the actual reassignment and adjustment 
 
     Parameters
@@ -170,9 +168,10 @@ def make_reassignment(adata: sc.AnnData,
     tx_to_reassign['accept'] = True
 
     print('Finalize transcript reassignment...')
-    for cell_type in tqdm(test_result):
-        tx_to_reassign.loc[tx_to_reassign.cell_id.isin(test_result[cell_type]['contaminated_cell_ids']),
-                                "accept"] = False
+    if test_result is not None:
+        for cell_type in tqdm(test_result):
+            tx_to_reassign.loc[tx_to_reassign.cell_id.isin(test_result[cell_type]['contaminated_cell_ids']),
+                                    "accept"] = False
     
     tx_to_reassign = tx_to_reassign[tx_to_reassign['accept']]
     tx_to_reassign.drop(columns=['accept'], inplace=True)
@@ -184,7 +183,7 @@ def make_reassignment(adata: sc.AnnData,
     # Update adata
     adata.layers["counts_"+str(int(layer_num+1))] = adata.layers[layer]+counts_to_add-counts_to_subtract 
     # Updata transcripts 
-    tx_to_reassign.loc[:, ['cell_id', 'neighbor_by_centroid']] = tx_to_reassign.loc[:, ['neighbor_by_centroid', 'cell_id']]
+    tx_to_reassign.loc[:, ['cell_id', 'neighbor_cell_id']] = tx_to_reassign.loc[:, ['neighbor_cell_id', 'cell_id']]
     tx_to_reassign.index = tx_to_reassign['molecule_id']
     tx_metadata["cell_id_"+str(layer_num)] = tx_metadata['cell_id']
     tx_metadata.update(tx_to_reassign)

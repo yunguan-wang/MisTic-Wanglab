@@ -56,7 +56,7 @@ def load_patch(adata,
     tx_patch = tx_patch.merge(cell_patch[['row_index']], 
                how='left', left_on="cell_id", right_index=True).rename(columns={"row_index": "row_index_self"})
     tx_patch = tx_patch.merge(cell_patch[['row_index']], 
-               how='left', left_on="neighbor_by_centroid", right_index=True).rename(columns={"row_index": "row_index_neighbor"})
+               how='left', left_on="neighbor_cell_id", right_index=True).rename(columns={"row_index": "row_index_neighbor"})
     
     cell_type_labels = torch.tensor(cell_patch['leiden'].astype(int).values, dtype=torch.int64)
     # cell_type_labels = torch.tensor(cell_patch['leiden'].astype(int).values, dtype=torch.int64).unsqueeze(1)

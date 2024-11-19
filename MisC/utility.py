@@ -14,7 +14,8 @@ from scipy.spatial.distance import cdist
 from itertools import combinations
 # Typing 
 from typing import Optional, Union, Tuple
-
+# User entertainment
+from tqdm.auto import tqdm 
 
 def import_data(cell_by_gene_counts: Union[str, pd.DataFrame],
                 cell_metadata: Union[str, pd.DataFrame],
@@ -284,16 +285,63 @@ def generate_count_patches(adata,
     return counts_to_subtract, counts_to_add
 
 
+def make_reassignment(adata: sc.AnnData,
+                      layer: str,
+                      tx_metadata: gpd.GeoDataFrame,
+                      tx_to_reassign: pd.DataFrame) -> Tuple[sc.AnnData, gpd.GeoDataFrame]:
+    """Given the testing results, this function makes the actual reassignment and adjustment 
+
+    Parameters
+    ----------
+    adata : sc.AnnData
+        The AnnData object containing cell metainformation
+    layer : str
+        The layer upon which the update is computed 
+    tx_metadata : gpd.GeoDataFrame
+        The detected transcripts
+    tx_assignment_addition : pd.DataFrame
+        Transcripts that should be reassigned to which cell type
+    tx_assignment_removal : pd.DataFrame
+        The original assignment
+    test_result : dict
+        A dictionary of the testing results 
+
+    Returns
+    -------
+    Tuple[sc.AnnData, gpd.GeoDataFrame]
+        The adjusted adata and tx_metadata 
+    """
+    
+    counts_to_subtract, counts_to_add = generate_count_patches(adata=adata,
+                                                               tx_to_reassign=tx_to_reassign)
+    
+    layer_num = extract_layer_num(layer)
+    # Update adata
+    adata.layers["counts_"+str(int(layer_num+1))] = adata.layers[layer]+counts_to_add-counts_to_subtract 
+    # Updata transcripts 
+    tx_to_reassign.loc[:, ['cell_id', 'neighbor_cell_id']] = tx_to_reassign.loc[:, ['neighbor_cell_id', 'cell_id']]
+    tx_to_reassign.index = tx_to_reassign['molecule_id']
+    tx_metadata["cell_id_"+str(layer_num)] = tx_metadata['cell_id']
+    tx_metadata.update(tx_to_reassign)
+    # No need to update boundary or metadata 
+    
+    return adata, tx_metadata
+
+
 def sample_gumbel(shape, 
                   model_device: torch.device,
                   eps=1e-20):
     U = torch.rand(shape).to(model_device)
     return -torch.log(-torch.log(U + eps) + eps)
 
-def binary_gumbel_softmax_sample(logits, temperature):
-    y = logits + sample_gumbel(logits.size())
+def binary_gumbel_softmax_sample(logits,
+                                 temperature,
+                                 model_device: torch.device):
+    y = logits + sample_gumbel(logits.size(), model_device=model_device)
     return torch.sigmoid(y / temperature)
 
-def multinomial_gumbel_softmax_sample(logits, temperature):
-    y = logits + sample_gumbel(logits.size())
+def multinomial_gumbel_softmax_sample(logits, 
+                                      temperature,
+                                      model_device: torch.device):
+    y = logits + sample_gumbel(logits.size(), model_device=model_device)
     return F.softmax(y / temperature, dim=-1)
