@@ -176,7 +176,8 @@ class misc(nn.Module):
     def loss_function(self,
                       cell_type_logits, 
                       cell_type_labels,
-                      reassign_probs):
+                      reassign_probs,
+                      verbose: bool=False):
         # Cross entropy loss (despite its name it's a loss)
         CEl = F.cross_entropy(cell_type_logits,
                              cell_type_labels, reduction='sum') 
@@ -185,10 +186,16 @@ class misc(nn.Module):
         KLD = torch.sum(reassign_probs * log_ratio, dim=-1).sum()
         # Can add an entropy term but let's first sit on this idea for a while 
         # entropy = 0.0
+        if verbose:
+            print("="*30)
+            print("The cross entropy loss is {} and KLD is {}".format(CEl.detach().numpy(), 
+                                                                      KLD.detach().numpy()))
+            print("="*30) 
         return CEl + KLD    
     
     def training_loop(self,
-                      n_epochs):
+                      n_epochs,
+                      verbose: bool=False):
         self.train()
         for epoch in range(n_epochs):
             np.random.shuffle(self.coord_list)
@@ -208,7 +215,8 @@ class misc(nn.Module):
                 self.optimizer.zero_grad()
                 loss = self.loss_function(cell_type_logits=cell_type_logits,
                                           cell_type_labels=cell_type_labels,
-                                          reassign_probs=reassign_probs)
+                                          reassign_probs=reassign_probs,
+                                          verbose=verbose)
                 loss.backward()
                 train_loss += loss.item()
                 self.optimizer.step()
