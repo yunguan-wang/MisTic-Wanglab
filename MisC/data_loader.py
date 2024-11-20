@@ -70,8 +70,10 @@ def load_patch(adata,
     row_index_self = torch.LongTensor(tx_patch[['row_index_self']].values, device=model_device)
     row_index_neighbor = torch.LongTensor(tx_patch[['row_index_neighbor']].values, device=model_device)
     col_index = torch.LongTensor(tx_patch[['col_index']].values, device=model_device)
+    tx_mask_distance = torch.tensor(tx_patch[['tx_mask_distance']].values,
+                                    dtype=torch.float32, device=model_device)
     
-    return cell_by_gene_counts, tx_features, cell_type_labels, row_index_self, row_index_neighbor, col_index
+    return cell_by_gene_counts, tx_features, cell_type_labels, row_index_self, row_index_neighbor, col_index, tx_mask_distance
     
     
 

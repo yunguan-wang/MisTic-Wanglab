@@ -1,5 +1,6 @@
 # Data IO
 import os 
+import json 
 import scanpy as sc
 import geopandas as gpd
 from geopandas import read_parquet
@@ -8,14 +9,48 @@ import pandas as pd
 import re 
 import numpy as np
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 from shapely import distance
 from scipy.spatial.distance import cdist
 from itertools import combinations
 # Typing 
 from typing import Optional, Union, Tuple
-# User entertainment
-from tqdm.auto import tqdm 
+
+
+def process_adata(adata: sc.AnnData,
+                layer: str) -> sc.AnnData:
+    """Generate UMAP embedding for an AnnData 
+
+    Parameters
+    ----------
+    adata : sc.AnnData
+        An AnnData to be updated 
+    layer : str
+        The layer upon which UMAP is computed 
+
+    Returns
+    -------
+    sc.AnnData
+        AnnData with updated infomation 
+    """
+    # Make sure X is the counts 
+    # Then for all subsequent processing, we can just proceed with the default 
+    adata.X = adata.layers[layer].copy()
+    sc.pp.normalize_total(adata, target_sum=1000)
+    sc.pp.log1p(adata)
+    # We also perform basic visualization 
+    print("UMAP")
+    sc.pp.scale(adata)
+    sc.pp.pca(adata)
+    sc.pp.neighbors(adata)
+    sc.tl.umap(adata)
+    # Save the embedding to its own key
+    # Note that X_umap always refers to the latest one 
+    # Can use sc.pl.embedding(adata, basis="X_umap_???") to plot specific embedding 
+    adata.obsm['X_umap_'+layer] = adata.obsm["X_umap"].copy()
+    return adata
+
 
 def import_data(cell_by_gene_counts: Union[str, pd.DataFrame],
                 cell_metadata: Union[str, pd.DataFrame],
@@ -124,20 +159,14 @@ def import_data(cell_by_gene_counts: Union[str, pd.DataFrame],
     adata.var['col_index'] = [i for i in range(adata.var.shape[0])]
     # As we will alter the counts later on, we will save a copy of the 
     # original count in one of the layers 
-    adata.layers['counts_0'] = counts.copy()
+    adata.layers['counts_0'] = adata.X.copy()
+    adata.raw = adata.copy()
     if preprocess:
         # Then we perform basic normalization and transformation 
         print("="*30)
         print("Successfully read in data. Performing basic transformation")
-        sc.pp.normalize_total(adata, target_sum=1000)
-        sc.pp.log1p(adata)
-        # We also perform basic visualization 
-        print("UMAP")
-        adata.raw = adata.copy()
-        sc.pp.scale(adata)
-        sc.pp.pca(adata)
-        sc.pp.neighbors(adata)
-        sc.tl.umap(adata)
+        adata = process_adata(adata=adata,
+                            layer="counts_0")
     # And we will use leiden to perform cell clustering
     if celltype_col is not None:
         print("Assigning pre-existing cell typing info from metadata.")
@@ -179,8 +208,6 @@ def calculate_mask_distance(adata: sc.AnnData,
         The threshold on cell-cell centroid distances beyond which we do not consider two cells being neighbors, by default 15
     min_centroid_dist : int, optional
         The threshold on cell-cell centroid distances under which we do not consider two cells being neighbors, by default 0
-    cluster_col : str, optional
-        Column name for cell clustering, by default 'leiden'
 
     Returns
     -------
@@ -217,9 +244,6 @@ def calculate_mask_distance(adata: sc.AnnData,
     mask_distance.reset_index(inplace=True)
     mask_distance = mask_distance.merge(adata.obs[['x', 'y', 'cell_centroid_geom']], how='left', 
                                         left_on='cell_id', right_index=True).set_geometry("cell_centroid_geom")
-    # mask_distance = gpd.GeoDataFrame(mask_distance, 
-    #                                  geometry=gpd.points_from_xy(mask_distance.x, mask_distance.y))
-    # mask_distance.rename_geometry("centroid_geom", inplace=True)
     return mask_distance
 
 
@@ -289,7 +313,7 @@ def make_reassignment(adata: sc.AnnData,
                       layer: str,
                       tx_metadata: gpd.GeoDataFrame,
                       tx_to_reassign: pd.DataFrame) -> Tuple[sc.AnnData, gpd.GeoDataFrame]:
-    """Given the testing results, this function makes the actual reassignment and adjustment 
+    """Make the actual reassignment and adjustment 
 
     Parameters
     ----------
@@ -299,25 +323,21 @@ def make_reassignment(adata: sc.AnnData,
         The layer upon which the update is computed 
     tx_metadata : gpd.GeoDataFrame
         The detected transcripts
-    tx_assignment_addition : pd.DataFrame
-        Transcripts that should be reassigned to which cell type
-    tx_assignment_removal : pd.DataFrame
-        The original assignment
-    test_result : dict
-        A dictionary of the testing results 
+    tx_to_reassign : pd.DataFrame
+        Transcripts that should be reassigned
 
     Returns
     -------
     Tuple[sc.AnnData, gpd.GeoDataFrame]
         The adjusted adata and tx_metadata 
     """
-    
     counts_to_subtract, counts_to_add = generate_count_patches(adata=adata,
                                                                tx_to_reassign=tx_to_reassign)
-    
     layer_num = extract_layer_num(layer)
     # Update adata
     adata.layers["counts_"+str(int(layer_num+1))] = adata.layers[layer]+counts_to_add-counts_to_subtract 
+    adata = process_adata(adata=adata,
+                        layer="counts_"+str(int(layer_num+1)))
     # Updata transcripts 
     tx_to_reassign.loc[:, ['cell_id', 'neighbor_cell_id']] = tx_to_reassign.loc[:, ['neighbor_cell_id', 'cell_id']]
     tx_to_reassign.index = tx_to_reassign['molecule_id']
@@ -328,20 +348,88 @@ def make_reassignment(adata: sc.AnnData,
     return adata, tx_metadata
 
 
-def sample_gumbel(shape, 
+def reverse_reassignment(adata,
+                         tx_to_reassign):
+    pass 
+
+
+def sample_gumbel(shape: tuple, 
                   model_device: torch.device,
-                  eps=1e-20):
+                  eps: float=1e-20) -> torch.tensor:
+    """Sample gumbel random variables
+
+    Parameters
+    ----------
+    shape : tuple
+        Shape of the final result 
+    model_device : torch.device
+        Specify where the tensor will be stored 
+    eps : float, optional
+        Used to avoid -inf from log, by default 1e-20
+
+    Returns
+    -------
+    torch.tensor
+        Gumbel RVs
+    """
     U = torch.rand(shape).to(model_device)
     return -torch.log(-torch.log(U + eps) + eps)
 
-def binary_gumbel_softmax_sample(logits,
-                                 temperature,
-                                 model_device: torch.device):
+
+def binary_gumbel_softmax_sample(logits: torch.tensor,
+                                 temperature: float,
+                                 model_device: torch.device) -> torch.tensor:
+    """Gumbel softmax trick for binary variables 
+
+    Parameters
+    ----------
+    logits : torch.tensor
+        Unnormalized class probabilities 
+    temperature : float
+        Temperature
+    model_device : torch.device
+        Specify where the tensor will be stored 
+
+    Returns
+    -------
+    torch.tensor
+        Gumbel softmax "bernoulli" variables 
+    """
     y = logits + sample_gumbel(logits.size(), model_device=model_device)
     return torch.sigmoid(y / temperature)
 
-def multinomial_gumbel_softmax_sample(logits, 
-                                      temperature,
-                                      model_device: torch.device):
+
+def categorical_gumbel_softmax_sample(logits: torch.tensor, 
+                                      temperature: float,
+                                      model_device: torch.device) -> torch.tensor:
+    """Gumbel softmax trick for variables with multiple categories 
+
+    Parameters
+    ----------
+    logits : torch.tensor
+        Unnormalized class probabilities 
+    temperature : float
+        Temperature
+    model_device : torch.device
+        Specify where the tensor will be stored 
+
+    Returns
+    -------
+    torch.tensor
+        Gumbel softmax "categorical" variables 
+    """
     y = logits + sample_gumbel(logits.size(), model_device=model_device)
     return F.softmax(y / temperature, dim=-1)
+
+
+class Positive(nn.Module):
+    def forward(self, X):
+        return F.softplus(X)
+    
+
+class JSONEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if hasattr(obj, 'to_json'):
+            return obj.to_json(orient='records')
+        return json.JSONEncoder.default(self, obj)
+    

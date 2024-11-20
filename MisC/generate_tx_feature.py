@@ -104,7 +104,7 @@ def expression_feature(adata: sc.AnnData,
     print("Performing one-vs-one differential analysis...")
     exp_1v1_list = []
     for neighbor_celltype, celltype in tqdm(combinations(adata.uns[layer+"_leiden"], 2), 
-                                            total=(adata.uns[layer+"_n_leiden"] * (adata.uns[layer+"_n_leiden"]+1))/2):
+                                            total=(adata.uns[layer+"_n_leiden"] * (adata.uns[layer+"_n_leiden"]-1))/2):
         # Since deseq2 will replace _ with -
         n_ct = neighbor_celltype.replace("_", "-")
         ct = celltype.replace("_", "-")
