@@ -63,17 +63,17 @@ def load_patch(adata,
     # cell_type_labels = torch.zeros(cell_patch.shape[0], 40, dtype=torch.float32).scatter(0, cell_type_labels, 1).to(model_device)
     cell_patch.drop(columns=['row_index', "leiden"], inplace=True)
     cell_by_gene_counts = torch.tensor(cell_patch.values, dtype=torch.float32, device=model_device)
-    tx_features = torch.tensor(tx_patch[['distance_ratio', 
+    tx_features = torch.tensor(tx_patch[['distance_feature', 
                                          "neighbor_self_exp_feature", 
                                          "rest_self_exp_feature"]].values, 
                                dtype=torch.float32, device=model_device)
     row_index_self = torch.LongTensor(tx_patch[['row_index_self']].values, device=model_device)
     row_index_neighbor = torch.LongTensor(tx_patch[['row_index_neighbor']].values, device=model_device)
     col_index = torch.LongTensor(tx_patch[['col_index']].values, device=model_device)
-    tx_mask_distance = torch.tensor(tx_patch[['tx_mask_distance']].values,
-                                    dtype=torch.float32, device=model_device)
+    neighbor_mask_distance_rank = torch.tensor(tx_patch[['neighbor_mask_distance_rank']].values,
+                                                dtype=torch.float32, device=model_device)
     
-    return cell_by_gene_counts, tx_features, cell_type_labels, row_index_self, row_index_neighbor, col_index, tx_mask_distance
+    return cell_by_gene_counts, tx_features, cell_type_labels, row_index_self, row_index_neighbor, col_index, neighbor_mask_distance_rank
     
     
 

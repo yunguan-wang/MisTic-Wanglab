@@ -11,6 +11,7 @@ import torch
 import torch.nn as nn 
 from torch import optim
 import torch.nn.functional as F
+from torch.distributions import Beta
 import torch.nn.utils.parametrize as parametrize
 from geopandas import GeoDataFrame  
 from shapely import Polygon
@@ -123,6 +124,7 @@ class misc(nn.Module):
         self.model_device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
         self.reassign_coefficients = None 
         self.cell_type_coefficients = None 
+        self.distance_prior = None
         self.optimizer = None
         
         
@@ -197,7 +199,8 @@ class misc(nn.Module):
         self.cell_type_coefficients = nn.Linear(in_features=self.adata.uns['n_genes'], 
                                                 out_features=self.adata.uns['counts_0_n_leiden'],
                                                 bias=True)
-        
+        # 
+        self.distance_prior = Beta(1,10)
         # Adam optimizer
         self.optimizer = optim.Adam(self.parameters(), lr=1e-3)
     
@@ -252,7 +255,7 @@ class misc(nn.Module):
                       cell_type_labels: torch.tensor,
                       reassign_hard: torch.tensor,
                       reassign_probs: torch.tensor,
-                      tx_mask_distance: torch.tensor,
+                      neighbor_mask_distance_rank: torch.tensor,
                       verbose: bool=False):
         # Cross entropy loss (despite its name it's a loss)
         CEl = F.cross_entropy(cell_type_logits,
@@ -260,16 +263,19 @@ class misc(nn.Module):
         # Assume a priori equal probability
         log_ratio_1 = torch.log(reassign_probs*2+1e-20)
         log_ratio_0 = torch.log((1-reassign_probs)*2+1e-20)
-        KLD = torch.sum(reassign_probs * log_ratio_1 + (1-reassign_probs) * log_ratio_0, dim=-1).mean()
+        KLD_reassign = torch.sum(reassign_probs * log_ratio_1 + (1-reassign_probs) * log_ratio_0, dim=-1).mean()
         # Can add an entropy term but let's first sit on this idea for a while 
         # entropy = 0.0
-        penalty = torch.sum(reassign_hard * tx_mask_distance, dim=-1).mean()
+        # penalty = torch.sum(reassign_hard * tx_mask_distance, dim=-1).mean()
+        reassign_ind = torch.nonzero(reassign_hard, as_tuple=True)
+        KLD_dist = -self.distance_prior.log_prob(neighbor_mask_distance_rank[reassign_ind]).mean()
+        
         if verbose:
             print("="*30)
-            print("The cross entropy loss is {} and KLD is {}".format(CEl.detach().numpy(), 
-                                                                      KLD.detach().numpy()))
+            print("The cross entropy loss is {} and KLD_reassign is {}".format(CEl.detach().numpy(), 
+                                                                      KLD_reassign.detach().numpy()))
             print("="*30) 
-        return CEl + KLD + self.penalty_weight * penalty
+        return CEl + KLD_reassign + KLD_dist
     
     def training_loop(self,
                       n_epochs: int,
@@ -280,11 +286,11 @@ class misc(nn.Module):
             self.current_temperature = self.init_temperature
             train_loss = 0.0
             for minibatch_ind, coord in enumerate(self.coord_list):
-                cell_by_gene_counts, tx_features, cell_type_labels, row_index_self, row_index_neighbor, col_index, tx_mask_distance = load_patch(adata=self.adata,
-                                                                                                                                                intf_tx=self.intf_tx,
-                                                                                                                                                coord_tuple=coord,
-                                                                                                                                                layer=self.current_layer,
-                                                                                                                                                model_device=self.model_device)
+                cell_by_gene_counts, tx_features, cell_type_labels, row_index_self, row_index_neighbor, col_index, neighbor_mask_distance_rank = load_patch(adata=self.adata,
+                                                                                                                                                            intf_tx=self.intf_tx,
+                                                                                                                                                            coord_tuple=coord,
+                                                                                                                                                            layer=self.current_layer,
+                                                                                                                                                            model_device=self.model_device)
                 reassign_hard, reassign_probs, cell_type_logits = self(tx_features=tx_features, 
                                                                         cell_by_gene_counts=cell_by_gene_counts, 
                                                                         row_index_self=row_index_self,
@@ -296,7 +302,7 @@ class misc(nn.Module):
                                           cell_type_labels=cell_type_labels,
                                           reassign_hard=reassign_hard,
                                           reassign_probs=reassign_probs,
-                                          tx_mask_distance=tx_mask_distance,
+                                          neighbor_mask_distance_rank=neighbor_mask_distance_rank,
                                           verbose=verbose)
                 loss.backward()
                 train_loss += loss.item()
@@ -316,7 +322,7 @@ class misc(nn.Module):
                     select_method: Union[str, float]) -> None:
         with torch.no_grad():
             self.eval()
-            tx_features = torch.tensor(self.intf_tx[['distance_ratio', 
+            tx_features = torch.tensor(self.intf_tx[['distance_feature', 
                                          "neighbor_self_exp_feature", 
                                          "rest_self_exp_feature"]].values, 
                                dtype=torch.float32, device=self.model_device)  

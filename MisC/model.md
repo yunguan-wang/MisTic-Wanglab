@@ -10,19 +10,36 @@ We for now assume that cell type information is available either through manual 
 ## Notations 
 Suppose that we have $t=1,\cdots,T$ detected transcripts, $c=1,\cdots,C$ segmented cells, $g=1,\cdots,G$ genes, and $k=1,\cdots,K$ cell types. 
 
-Associated with each transcript $t$, we have its currently assigned cell $a_t \in \{1, \cdots, C\}$, its nearest neighbor cell of a different cell type $b_t \in \{1, \cdots, C\}$, its gene type $r_t \in \{1, \cdots, G\}$, and its spatial location $u_t \in \mathbb{R}^2$. We let $\delta_t \in \{0,1\}$ be an indicator for reassignment, where 0 means remaining the same (assigning to $a_t$) and 1 means assigning to $b_t$. We further construct a $d$-dimensional vector $z_t \in \mathbb{R}^d$ as a series of explanatory variables for computing reassignment probability. 
-
 For cell $c$ we let $\theta_c \in \{1,\cdots, K\}$ be its cell type, $v_c$ be a vector describing its location (this can be simply its cell centroid or coordinates of its cell boundary polygon vertices) and $x_c = [x_c^1, \cdots, x_c^G]$ be the observed gene counts (or noisy gene counts). We then let $y_c = [y_c^1, \cdots, y_c^G]$ be the unobserved true gene counts. 
+
+Associated with each transcript $t$, we have its currently assigned cell $a_t \in \{1, \cdots, C\}$, its gene type $r_t \in \{1, \cdots, G\}$, and its spatial location $u_t \in \mathbb{R}^2$. If we know the cell type information $\{\theta_c\}$, we can further figure out its nearest neighbor cell of a different cell type $b_t \in \{1, \cdots, C\}$. We let $\delta_t \in \{0,1\}$ be an indicator for reassignment, where 0 means remaining the same (assigning to $a_t$) and 1 means assigning to $b_t$. We further construct a $d$-dimensional vector $z_t \in \mathbb{R}^d$ as a series of explanatory variables for computing reassignment probability. We assume that $z_t$ is completely determined by $\{\theta_c, v_c, x_c\}$ and $\{a_t, b_t, u_t, r_t\}$ (distance computation and differential analysis). 
+
+To incorporate our understanding that for the same type of transcript, reassigning one that's closer to the boundary is better than reassigning one that's deeper inside the cell, for each transcript $t$, we further construct a "cost" term $m_t$. 
 
 Finally, we let $||\{*\}||$ denote the cardinality of the enclosed set. 
 
-Therefore, if we assume that $\{\theta_c\}$ are known, we introduced two types of latent RVs that we wish to infer $\{\delta_t\}$ and $\{y_c\}$. We assume that $z_t$ is completely determined given $\{x_c, v_c\}$ and $\{a_t, b_t, r_t, u_t\}$ (distance computation and differential analysis). 
+Therefore, if we assume that $\{\theta_c\}$ are known, we introduced two types of latent RVs that we wish to infer $\{\delta_t\}$ and $\{y_c\}$. 
 
 ## Model 
 Although we can model the observed gene counts, to align with our current pipeline, we choose to model the cell types. Given the size of a typical SRT data, we opt for VI. (For other alternatives, see google doc for their sketches).
 
 To get started, we note that given a gene $g$ and a given cell $c$, we have 
 $$y_c^g=x_c^g-||\{t: \delta_t=1 \text{ and } a_t=c \text{ and } r_t=g\}|| + ||\{t:\delta_t=1 \text{ and } b_t=c \text{ and } r_t=g\}||$$
+
+We choose to model the log conditional probability: 
+$$\log p(\{\theta_c\}|\{x_c, v_c\}, \{a_t, r_t, u_t\})$$
+Note that we are not conditioning on $\{b_t, z_t\}$ as they are known only when $\{\theta_c\}$ is known. 
+
+$$
+\log p(\{\theta_c\}|\{x_c, v_c\}, \{a_t, r_t, u_t\}) = \iint p(.) \log \dfrac{p(\{\theta_c\}, \{y_c\}, \{\delta_t\}, \{m_t\}|\{x_c, v_c\}, \{a_t, r_t, u_t\})}{p(\{y_c\}, \{\delta_t\}, \{m_t\}|\{x_c, v_c, \theta_c\}, \{a_t, r_t, u_t\})}d\{y_c\}d\{\delta_t\},
+$$
+where 
+$$p(.) = p(\{y_c\}, \{\delta_t\}, \{m_t\}|\{x_c, v_c, \theta_c\}, \{a_t, r_t, u_t\})$$
+
+
+
+
+
 
 $$
 \log p(\{\theta_c\}|\{x_c, v_c\}, \{a_t, b_t, r_t, u_t\}) = \iint p(.) \log \dfrac{p(\{\theta_c\}, \{y_c\}, \{\delta_t\}|\{x_c, v_c\}, \{a_t, b_t, r_t\})}{p(\{y_c\}, \{\delta_t\}|\{x_c, v_c, \theta_c\}, \{a_t, b_t, r_t, u_t\})}d\{y_c\}d\{\delta_t\},
