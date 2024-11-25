@@ -1,6 +1,6 @@
 # Data IO
-import h5py
 import os
+import json 
 import pandas as pd
 import scanpy as sc
 import geopandas as gpd
@@ -13,12 +13,11 @@ from torch import optim
 import torch.nn.functional as F
 from torch.distributions import Beta
 import torch.nn.utils.parametrize as parametrize
-from geopandas import GeoDataFrame  
-from shapely import Polygon
 # Utility function 
 from MisC.utility import import_data, calculate_mask_distance,\
-    binary_gumbel_softmax_sample, extract_layer_num, mask_eval,\
-        make_reassignment, Positive, JSONEncoder
+    binary_gumbel_softmax_sample, extract_layer_num,\
+        make_reassignment_adata, make_reassignment_tx_metadata,\
+            Positive, JSONEncoder, even_split
 from MisC.generate_tx_feature import generate_feature
 from MisC.data_loader import generate_patch_coords, load_patch
 # Typing 
@@ -270,12 +269,14 @@ class misc(nn.Module):
         reassign_ind = torch.nonzero(reassign_hard, as_tuple=True)
         KLD_dist = -self.distance_prior.log_prob(neighbor_mask_distance_rank[reassign_ind]).mean()
         
+        l2_regularization = torch.sum(torch.square(self.reassign_coefficients.weight))
+        
         if verbose:
             print("="*30)
             print("The cross entropy loss is {} and KLD_reassign is {}".format(CEl.detach().numpy(), 
                                                                       KLD_reassign.detach().numpy()))
             print("="*30) 
-        return CEl + KLD_reassign + KLD_dist
+        return CEl + KLD_reassign + KLD_dist + l2_regularization
     
     def training_loop(self,
                       n_epochs: int,
@@ -318,30 +319,51 @@ class misc(nn.Module):
             print('====> Epoch: {} Average loss: {:.4f}'.format(
                     epoch, train_loss / len(self.coord_list)))
 
-    def reassign_tx(self,
-                    select_method: Union[str, float]) -> None:
+    def trial_reassign_tx(self,
+                          criteria: dict) -> None:
         with torch.no_grad():
             self.eval()
-            tx_features = torch.tensor(self.intf_tx[['distance_feature', 
-                                         "neighbor_self_exp_feature", 
-                                         "rest_self_exp_feature"]].values, 
-                               dtype=torch.float32, device=self.model_device)  
-            reassign_hard, reassign_probs = self.encode(tx_features=tx_features,
-                                                        temperature=self.min_temperature)
-            if isinstance(select_method, str):
-                self.intf_tx['reassign'] = (reassign_hard.squeeze(1).numpy()) 
-            else:
-                self.intf_tx['reassign'] = (reassign_probs.squeeze(1).numpy()>select_method) 
-
-            tx_to_reassign = self.intf_tx.loc[self.intf_tx['reassign']==1, 
-                                              ['molecule_id', 'cell_id', 'neighbor_cell_id', "gene"]]
-            self.tx_to_reassign_dict[self.current_layer] = tx_to_reassign
-            self.adata, self.tx_metadata = make_reassignment(adata=self.adata,
-                                                             layer=self.current_layer,
-                                                             tx_metadata=self.tx_metadata,
-                                                             tx_to_reassign=tx_to_reassign)
-            layer_num = extract_layer_num(self.current_layer)
-            self.current_layer = "counts_"+str(int(layer_num+1))
+            tx_features_chunks = even_split(array=self.intf_tx[['distance_feature', 
+                                            "neighbor_self_exp_feature", 
+                                            "rest_self_exp_feature"]].values,
+                                            chunk_size=1000)
+            reassign_hard = np.array([], dtype=float).reshape(0,1)
+            reassign_probs = np.array([], dtype=float).reshape(0,1)
+            for tx_features_chunk in tx_features_chunks:
+                tx_features = torch.tensor(tx_features_chunk, 
+                                           dtype=torch.float32, 
+                                           device=self.model_device)
+                reassign_hard_chunk, reassign_probs_chunk = self.encode(tx_features=tx_features,
+                                                                        temperature=self.min_temperature)
+                reassign_hard = np.vstack([reassign_hard, reassign_hard_chunk.numpy()])
+                reassign_probs = np.vstack([reassign_probs, reassign_probs_chunk.numpy()])
+            
+            for criterion_name in criteria: 
+                criterion = criteria[criterion_name]
+                if isinstance(criterion, str):
+                    self.intf_tx['reassign'] = (reassign_hard.squeeze(1)) 
+                else:
+                    self.intf_tx['reassign'] = (reassign_probs.squeeze(1)>criterion)  
+                tx_to_reassign = self.intf_tx.loc[self.intf_tx['reassign']==1, 
+                                                    ['molecule_id', 'cell_id', 'neighbor_cell_id', "gene"]]
+                trial_layer = self.current_layer+"_"+criterion_name
+                self.tx_to_reassign_dict[trial_layer] = tx_to_reassign.copy()
+                self.adata = make_reassignment_adata(adata=self.adata,
+                                                     layer=self.current_layer,
+                                                     tx_to_reassign=tx_to_reassign,
+                                                     trial_layer=trial_layer)
+    
+    def final_reassign_tx(self,
+                          selected_criterion: str) -> None:
+        
+        tx_to_reassign = self.tx_to_reassign_dict[self.current_layer+"_"+selected_criterion].copy()
+        self.adata = make_reassignment_adata(adata=self.adata, 
+                                             layer=self.current_layer,
+                                             tx_to_reassign=tx_to_reassign)
+        self.tx_metadata = make_reassignment_tx_metadata(tx_to_reassign=tx_to_reassign,
+                                                         tx_metadata=self.tx_metadata)
+        layer_num = extract_layer_num(self.current_layer)
+        self.current_layer = "counts_"+str(int(layer_num+1))
 
     def save_model(self,
                    path: str,
@@ -361,6 +383,8 @@ class misc(nn.Module):
                                         index=True)
             self.intf_tx.to_parquet(os.path.join(dir_name, "intf_tx.parquet"),
                                     index=True)
+            with open(os.path.join(dir_name, "tx_to_reassign_dict.json"), "w") as f:
+                json.dump(self.tx_to_reassign_dict, f, cls=JSONEncoder)
         
     def load_model(self,
                    path: str,
@@ -375,61 +399,7 @@ class misc(nn.Module):
             self.cell_coords = read_parquet(os.path.join(dir_name, "cell_coords.parquet"))
             self.mask_distance = read_parquet(os.path.join(dir_name, "mask_distance.parquet"))
             self.intf_tx = read_parquet(os.path.join(dir_name, "intf_tx.parquet"))
-        
-    ###########
-    # Do not run just copied and pasted        
-    @classmethod 
-    def assemble_cell_coords(cls, 
-                             input_path: str,
-                             output_path: str) -> None:
-        """Assemble the file containing the polygons of cell masks
-
-        Parameters
-        ----------
-        input_path : str
-            The input folder
-        output_path : str
-            The output folder
-        """
-        boundries_fn = os.listdir(input_path + '/cell_boundaries')
-        for bfn in boundries_fn:
-            cell_coords = pd.Series()
-            # print(bfn)
-            bfn = os.path.join(input_path, 'cell_boundaries', bfn)
-            f = h5py.File(bfn,'r')
-            diff_coords = []
-            for cell in list(f['featuredata']):
-                coords = []
-                for i in range(7):
-                    tmp = np.array((f['featuredata'][cell]['zIndex_'+str(i)]['p_0']['coordinates'][0]))
-                    coords.append(tmp)
-                non_unique, unique_v = mask_eval(coords)
-                if non_unique:
-                    print(cell)
-                else: 
-                    cell_coords[cell] = unique_v
-            print(bfn)
-            f.close()
-            cell_coords = cell_coords.to_frame(name='coord')
-            cell_coords['X'] = cell_coords.coord.apply(lambda x: '_'.join(x[0][:,0].round(2).astype(str)))
-            cell_coords['Y'] = cell_coords.coord.apply(lambda x: '_'.join(x[0][:,1].round(2).astype(str)))
-            if os.path.exists(os.path.join(input_path, 'cell_coords.csv')):
-                cell_coords.iloc[:,1:].to_csv(input_path + '/cell_coords.csv', mode='a', header=False)
-            else:
-                    cell_coords.iloc[:,1:].to_csv(input_path + '/cell_coords.csv')
-        
-        cell_masks.index = ['cell_' + str(x+1) for x in cell_masks.index]
-        cell_masks = cell_masks.loc[spacia_meta.index]
-        cell_masks['n_polygon'] = cell_masks.X.apply(lambda x: len(x.split('_')))
-        cell_masks.X = cell_masks.X.str.split('_')
-        cell_masks.Y = cell_masks.Y.str.split('_')
-        cell_masks['polygon'] = cell_masks.apply(
-            lambda x: Polygon([(x.X[i], x.Y[i]) for i in range(x.n_polygon)]), axis=1)
-        # Save as geopandas parquet file
-        GeoDataFrame(
-            cell_masks[['polygon']],geometry='polygon'
-            ).to_parquet('cell_polygons.parquet', index=True)
-        
-    @classmethod 
-    def foo(cls):
-        pass 
+            self.tx_to_reassign_dict = json.load(open(dir_name, "tx_to_reassign_dict.json"))
+            # Then convert into dataframes 
+            
+    

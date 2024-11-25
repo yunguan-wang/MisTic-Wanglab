@@ -13,7 +13,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 from shapely import distance
 from scipy.spatial.distance import cdist
-from itertools import combinations
 # Typing 
 from typing import Optional, Union, Tuple
 
@@ -247,6 +246,10 @@ def calculate_mask_distance(adata: sc.AnnData,
     return mask_distance
 
 
+def even_split(array: np.array, chunk_size: int) -> list:
+    return np.array_split(array, np.ceil(array.shape[0] / chunk_size), axis=0)
+
+
 
 def extract_layer_num(layer: str) -> int:
     """Extracts the layer number 
@@ -263,31 +266,6 @@ def extract_layer_num(layer: str) -> int:
     """
     return int(re.findall(r'\d+', layer)[0])
     
-
-def mask_eval(l: list) -> Tuple[bool, list]:
-    """Given a list of coordinates, check if it contains only on polygon
-
-    Parameters
-    ----------
-    l : list
-        List of potentially vertices of different polygons
-
-    Returns
-    -------
-    Tuple[bool, list]
-        If the list defines only one polygon, and the coordinates of its vertices 
-    """
-    unique_l = []
-    for a,b in combinations(l,2):
-        if (len(unique_l) ==0) or (a not in np.array(unique_l)):
-            unique_l.append(a)
-        if np.array_equal(a, b):
-            continue
-        else:
-            if b not in np.array(unique_l):
-                unique_l.append(b)
-    return len(unique_l) > 1, unique_l
-
 
 def generate_count_patches(adata,
                            tx_to_reassign):
@@ -309,10 +287,10 @@ def generate_count_patches(adata,
     return counts_to_subtract, counts_to_add
 
 
-def make_reassignment(adata: sc.AnnData,
-                      layer: str,
-                      tx_metadata: gpd.GeoDataFrame,
-                      tx_to_reassign: pd.DataFrame) -> Tuple[sc.AnnData, gpd.GeoDataFrame]:
+def make_reassignment_adata(adata: sc.AnnData,
+                            layer: str,
+                            tx_to_reassign: pd.DataFrame,
+                            trial_layer: Optional[str]=None) -> sc.AnnData:
     """Make the actual reassignment and adjustment 
 
     Parameters
@@ -321,8 +299,6 @@ def make_reassignment(adata: sc.AnnData,
         The AnnData object containing cell metainformation
     layer : str
         The layer upon which the update is computed 
-    tx_metadata : gpd.GeoDataFrame
-        The detected transcripts
     tx_to_reassign : pd.DataFrame
         Transcripts that should be reassigned
 
@@ -333,24 +309,33 @@ def make_reassignment(adata: sc.AnnData,
     """
     counts_to_subtract, counts_to_add = generate_count_patches(adata=adata,
                                                                tx_to_reassign=tx_to_reassign)
-    layer_num = extract_layer_num(layer)
+    if trial_layer is None:
+        layer_num = extract_layer_num(layer)
+        trial_layer = "counts_"+str(int(layer_num+1))
+        
     # Update adata
-    adata.layers["counts_"+str(int(layer_num+1))] = adata.layers[layer]+counts_to_add-counts_to_subtract 
+    adata.layers[trial_layer] = adata.layers[layer]+counts_to_add-counts_to_subtract 
     adata = process_adata(adata=adata,
                         layer="counts_"+str(int(layer_num+1)))
-    # Updata transcripts 
-    tx_to_reassign.loc[:, ['cell_id', 'neighbor_cell_id']] = tx_to_reassign.loc[:, ['neighbor_cell_id', 'cell_id']]
-    tx_to_reassign.index = tx_to_reassign['molecule_id']
-    tx_metadata["cell_id_"+str(layer_num)] = tx_metadata['cell_id']
-    tx_metadata.update(tx_to_reassign)
-    # No need to update boundary or metadata 
     
-    return adata, tx_metadata
+    return adata
 
 
-def reverse_reassignment(adata,
-                         tx_to_reassign):
-    pass 
+def make_reassignment_tx_metadata(tx_to_reassign,
+                                  tx_metadata) -> gpd.GeoDataFrame:
+    
+    tx_to_reassign.index = tx_to_reassign['molecule_id']
+    tx_to_reassign.loc[:, ['cell_id', 'neighbor_cell_id']] = tx_to_reassign.loc[:, ['neighbor_cell_id', 'cell_id']]
+    # tx_metadata["cell_id_"+str(layer_num)] = tx_metadata['cell_id']
+    tx_metadata.update(tx_to_reassign)
+    return tx_metadata
+
+
+def reverse_reassignment_tx_metadata(tx_to_reassign,
+                                     tx_metadata):
+    tx_to_reassign.index = tx_to_reassign['molecule_id']
+    tx_metadata.update(tx_to_reassign)
+    return tx_metadata
 
 
 def sample_gumbel(shape: tuple, 
