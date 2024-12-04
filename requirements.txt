@@ -1,0 +1,6 @@
+numpy
+pandas
+pydeseq2
+scipy
+scanpy
+torch
