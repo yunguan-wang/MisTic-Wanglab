@@ -85,7 +85,7 @@ def import_data(cell_by_gene_counts: Union[str, pd.DataFrame],
         Either the path to the parquet file or the geopandas GeoDataFrame containing the vertex information 
         for each cell. The first column is assumed to be the IDs for cells. It should contain one column 'Geometry'
         that records the coordinates of the vertices.
-    detected_transcripts : Union[str, pd.DataFrame]
+    detected_transcripts : Union[str, pd.DataFrame, gpd.GeoDataFrame]
         Either the path to the csv file or a pandas dataframe containing the information of the detected transcripts.
         The first column is assumed to be some index. The information should contain the ID for a transcripte/molecule, 
         the ID of the cell it belongs to, its xy coordinate named global_x, global_y respectively, and its gene information. 
@@ -175,7 +175,7 @@ def import_data(cell_by_gene_counts: Union[str, pd.DataFrame],
         print("Performing Leiden clustering.")
         sc.tl.leiden(adata, resolution=leiden_res, key_added='cell_type')
         adata.obs['leiden'] = adata.obs['cell_type'].astype(str)
-    
+    # Record some meta information 
     adata.uns['counts_0_leiden'] = np.unique(adata.obs['leiden'])
     adata.uns['counts_0_n_leiden'] = len(adata.uns['counts_0_leiden'])
     adata.uns['centroid_x_min'] = adata.obs['x'].min()
@@ -192,10 +192,9 @@ def import_data(cell_by_gene_counts: Union[str, pd.DataFrame],
 
 def calculate_mask_distance(adata: sc.AnnData,
                             cell_coords: gpd.GeoDataFrame,
-                            max_centroid_dist: int=50,
-                            min_centroid_dist: int=0) -> gpd.GeoDataFrame:
-    """Calculate cell-cell distance based on their cell masks. The calculation is only done among 
-    neighboring cells of different types. 
+                            max_centroid_dist: float=50,
+                            min_centroid_dist: float=0) -> gpd.GeoDataFrame:
+    """Calculate cell-cell distance based on their cell masks. 
 
     Parameters
     ----------
@@ -203,9 +202,9 @@ def calculate_mask_distance(adata: sc.AnnData,
         The AnnData object containing cell metainformation
     cell_coords : gpd.GeoDataFrame
         The geodataframe recording the vertices of all the cells 
-    max_centroid_dist : int, optional
+    max_centroid_dist : float, optional
         The threshold on cell-cell centroid distances beyond which we do not consider two cells being neighbors, by default 15
-    min_centroid_dist : int, optional
+    min_centroid_dist : float, optional
         The threshold on cell-cell centroid distances under which we do not consider two cells being neighbors, by default 0
 
     Returns
@@ -237,35 +236,32 @@ def calculate_mask_distance(adata: sc.AnnData,
     mask_distance.reset_index(inplace=True, drop=False)
     mask_distance = mask_distance.merge(adata.obs[['x', 'y', 'cell_centroid_geom']], how='left', 
                                         left_on='cell_id', right_index=True).set_geometry("cell_centroid_geom")
-    ###############################################################
-    # # We further exclude cells from the same cell cluster
-    # # since we are only interested in comparing the transcript abundances among cells of different types 
-    # adj = adj.agg(lambda x: [
-    #         y for y in x.n if adata.obs.loc[y, 'leiden']!=adata.obs.loc[x.name, 'leiden']], axis=1)
-    # We then exclude cells surrounded by cells of its own type 
-    # adj_nonself = adj[adj.apply(len)>0]
-    # # Then we compute the cell-cell distance based on their masks
-    # adj_nonself_masks_ids = adj_nonself.explode()
-    # md = distance(
-    #     cell_coords.loc[adj_nonself_masks_ids.index, "cell_boundary_geom"].values,
-    #     cell_coords.loc[adj_nonself_masks_ids['n'].values, "cell_boundary_geom"].values
-    # )
-    # mask_distance = gpd.GeoDataFrame(
-    #     adj_nonself_masks_ids, columns=['neighbor_cell_id'])
-    # mask_distance['mask_distance'] = md
-    # mask_distance.reset_index(inplace=True)
-    # mask_distance = mask_distance.merge(adata.obs[['x', 'y', 'cell_centroid_geom']], how='left', 
-    #                                     left_on='cell_id', right_index=True).set_geometry("cell_centroid_geom")
     return mask_distance
 
 
-def even_split(array: np.array, chunk_size: int) -> list:
+def even_split(array: np.array, 
+               chunk_size: int) -> list:
+    """Split an array into chunks of specified size 
+
+    Parameters
+    ----------
+    array : np.array
+        An array to be split
+    chunk_size : int
+        The target chunk size 
+
+    Returns
+    -------
+    list
+        A list of chunks of the original array 
+    """
     return np.array_split(array, np.ceil(array.shape[0] / chunk_size), axis=0)
 
 
 
 def extract_layer_num(layer: str) -> int:
     """Extracts the layer number 
+    It extracts all the number in the layer string but only returns the first one
 
     Parameters
     ----------
@@ -280,8 +276,23 @@ def extract_layer_num(layer: str) -> int:
     return int(re.findall(r'\d+', layer)[0])
     
 
-def generate_count_patches(adata,
-                           tx_to_reassign):
+def generate_count_patches(adata: sc.AnnData,
+                           tx_to_reassign: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """Based on the transcript reassignment, generate patches to update the current count matrix 
+
+    Parameters
+    ----------
+    adata : sc.AnnData
+        An AnnData to be updated 
+    tx_to_reassign : pd.DataFrame
+        Transcripts that should be reassigned
+
+    Returns
+    -------
+    Tuple[pd.DataFrame, pd.DataFrame]
+        The first dataframe contains counts that should be subtracted from the current count
+        The second dataframe contains counts that should be added to the current count
+    """
     # Generate two patches for the count matrix 
     counts_to_subtract = pd.DataFrame(0, index=adata.obs_names, columns=adata.var_names)
     counts_to_add = pd.DataFrame(0, index=adata.obs_names, columns=adata.var_names)
@@ -314,11 +325,12 @@ def make_reassignment_adata(adata: sc.AnnData,
         The layer upon which the update is computed 
     tx_to_reassign : pd.DataFrame
         Transcripts that should be reassigned
-
+    trial_layer : Optional[str] 
+        If provided, the updated counts will be stored in this layer 
     Returns
     -------
-    Tuple[sc.AnnData, gpd.GeoDataFrame]
-        The adjusted adata and tx_metadata 
+    sc.AnnData
+        The adjusted adata
     """
     counts_to_subtract, counts_to_add = generate_count_patches(adata=adata,
                                                                tx_to_reassign=tx_to_reassign)
@@ -328,15 +340,27 @@ def make_reassignment_adata(adata: sc.AnnData,
         
     # Update adata
     adata.layers[trial_layer] = adata.layers[layer]+counts_to_add-counts_to_subtract 
-    adata = process_adata(adata=adata,
-                         layer=trial_layer)
+    adata = process_adata(adata=adata, layer=trial_layer)
     
     return adata
 
 
-def make_reassignment_tx_metadata(tx_to_reassign,
-                                  tx_metadata) -> gpd.GeoDataFrame:
-    
+def make_reassignment_tx_metadata(tx_to_reassign: pd.DataFrame,
+                                  tx_metadata: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
+    """_summary_
+
+    Parameters
+    ----------
+    tx_to_reassign : pd.DataFrame
+        _description_
+    tx_metadata : gpd.GeoDataFrame
+        _description_
+
+    Returns
+    -------
+    gpd.GeoDataFrame
+        _description_
+    """
     tx_to_reassign.index = tx_to_reassign['molecule_id']
     tx_to_reassign.loc[:, ['cell_id', 'neighbor_cell_id']] = tx_to_reassign.loc[:, ['neighbor_cell_id', 'cell_id']]
     # tx_metadata["cell_id_"+str(layer_num)] = tx_metadata['cell_id']
@@ -344,8 +368,22 @@ def make_reassignment_tx_metadata(tx_to_reassign,
     return tx_metadata
 
 
-def reverse_reassignment_tx_metadata(tx_to_reassign,
-                                     tx_metadata):
+def reverse_reassignment_tx_metadata(tx_to_reassign: pd.DataFrame,
+                                     tx_metadata: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
+    """_summary_
+
+    Parameters
+    ----------
+    tx_to_reassign : pd.DataFrame
+        _description_
+    tx_metadata : gpd.GeoDataFrame
+        _description_
+
+    Returns
+    -------
+    gpd.GeoDataFrame
+        _description_
+    """
     tx_to_reassign.index = tx_to_reassign['molecule_id']
     tx_metadata.update(tx_to_reassign)
     return tx_metadata
@@ -421,13 +459,20 @@ def categorical_gumbel_softmax_sample(logits: torch.tensor,
 
 
 class Positive(nn.Module):
+    """This class is used to reparametrize model weights 
+
+    """
     def forward(self, X):
         return F.softplus(X)
     
 
 class JSONEncoder(json.JSONEncoder):
+    """This class is used to save dictionary of pd.DataFrame to a json file
+
+    """
     def default(self, obj):
         if hasattr(obj, 'to_json'):
             return obj.to_json(orient='records')
         return json.JSONEncoder.default(self, obj)
-    
+
+

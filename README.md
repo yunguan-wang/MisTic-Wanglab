@@ -1,4 +1,4 @@
-![Logo](/assets/MisC.svg)
+![Logo](/assets/MisC.png)
 
 # MisC
 > Reassign transcripts 

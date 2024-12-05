@@ -1,3 +1,4 @@
+from psutil import virtual_memory
 import numpy as np 
 import pandas as pd 
 import torch 
@@ -8,6 +9,11 @@ import torch
 def generate_patch_coords(adata,
                           intf_tx,
                           percent_cell_per_patch: float=0.01):
+    # if cpu 
+    memory = virtual_memory()
+    available_memory = memory.available/(1024**3)
+    # if gpu 16GB >=p100 v100 has 32gb
+    
     coord_list = []
     dx = (adata.uns['centroid_x_max']-adata.uns['centroid_x_min'])*np.sqrt(percent_cell_per_patch)
     dy = (adata.uns['centroid_y_max']-adata.uns['centroid_y_min'])*np.sqrt(percent_cell_per_patch)
@@ -69,8 +75,6 @@ def load_patch(adata,
     row_index_self = torch.LongTensor(tx_patch[['row_index_self']].values, device=model_device)
     row_index_neighbor = torch.LongTensor(tx_patch[['row_index_neighbor']].values, device=model_device)
     col_index = torch.LongTensor(tx_patch[['col_index']].values, device=model_device)
-    # neighbor_mask_distance_rank = torch.tensor(tx_patch[['neighbor_mask_distance_rank']].values,
-    #                                             dtype=torch.float32, device=model_device)
     
     return cell_by_gene_counts, tx_features, tx_prior_features, cell_type_labels, row_index_self, row_index_neighbor, col_index
     
