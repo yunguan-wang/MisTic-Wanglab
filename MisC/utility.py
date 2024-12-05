@@ -329,7 +329,7 @@ def make_reassignment_adata(adata: sc.AnnData,
     # Update adata
     adata.layers[trial_layer] = adata.layers[layer]+counts_to_add-counts_to_subtract 
     adata = process_adata(adata=adata,
-                        layer="counts_"+str(int(layer_num+1)))
+                         layer=trial_layer)
     
     return adata
 

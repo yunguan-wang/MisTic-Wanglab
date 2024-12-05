@@ -6,6 +6,7 @@ import torch
 # Set an upper limit  we can decide on the percentage 
 
 def generate_patch_coords(adata,
+                          intf_tx,
                           percent_cell_per_patch: float=0.01):
     coord_list = []
     dx = (adata.uns['centroid_x_max']-adata.uns['centroid_x_min'])*np.sqrt(percent_cell_per_patch)
@@ -20,7 +21,9 @@ def generate_patch_coords(adata,
         for bottom_y in bottom_y_array:
             right_x = left_x + dx
             top_y = bottom_y + dy
-            ind = (adata.obs['x']>left_x) & (adata.obs['x']<right_x) & (adata.obs['y']>bottom_y) & (adata.obs['y']<top_y)
+            ind = (adata.obs['x']>left_x) & (adata.obs['x']<right_x) &\
+                    (adata.obs['y']>bottom_y) & (adata.obs['y']<top_y) &\
+                    (adata.obs.index.isin(intf_tx['cell_id']))
             if ind.sum() > 10:
                 coord_list.append((left_x, right_x, bottom_y, top_y))
         

@@ -179,6 +179,7 @@ class misc(nn.Module):
     def patchfy_data(self,
                     percent_cell_per_patch: float=0.01) -> None:
         self.coord_list = generate_patch_coords(adata=self.adata,
+                                                intf_tx=self.intf_tx,
                                                 percent_cell_per_patch=percent_cell_per_patch) 
     
     def initiate_parameters(self,
