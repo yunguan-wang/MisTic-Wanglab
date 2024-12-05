@@ -138,7 +138,7 @@ def remove_tx(
 
     intf_tx = intf_tx[intf_tx.tx_mask_distance<tx_mask_d_max].sort_values('tx_mask_distance')
     intf_tx['pct_exp_celltype'] = intf_tx.apply(
-        lambda x: percent_pos.loc[x['celltype'],x['gene']], axis=1).values
+        lambda x: percent_pos.loc[x['cell_type'],x['gene']], axis=1).values
     intf_tx['pct_exp_nearby'] = intf_tx.apply(
         lambda x: percent_pos.loc[x['neaby_celltype'],x['gene']], axis=1).values
     intf_tx['pct_diff'] = intf_tx.pct_exp_nearby - intf_tx.pct_exp_celltype
@@ -156,7 +156,7 @@ def remove_tx(
                 model.fit(fold_change.values.reshape((-1,1)))
                 gmm_dict["{}-{}".format(cell_type0, cell_type1)] = model
         intf_tx['remove_prob'] = intf_tx.apply(lambda x: mix_norm_cdf(x['pct_diff'],
-                                                gmm_dict["{}-{}".format(x['celltype'], x['neaby_celltype'])]), axis=1).values
+                                                gmm_dict["{}-{}".format(x['cell_type'], x['neaby_celltype'])]), axis=1).values
 
         intf_tx['remove'] = np.random.binomial(1, intf_tx['remove_prob'])
     else:
@@ -217,7 +217,7 @@ def annotate_tx_mask_distance(
     intf_tx['mask_geom'] = cell_coords.loc[
         intf_tx.neaghbor_by_centroid.values, 'Geometry'].values
     intf_tx['tx_mask_distance'] = distance(intf_tx['tx_geom'], intf_tx['mask_geom'])
-    intf_tx['celltype'] = cell_coords.loc[intf_tx.cell_id,'leiden'].values
+    intf_tx['cell_type'] = cell_coords.loc[intf_tx.cell_id,'leiden'].values
     intf_tx['neaby_celltype'] = cell_coords.loc[intf_tx.neaghbor_by_centroid,'leiden'].values
     return intf_tx
 
@@ -244,7 +244,7 @@ def annotate_tx_mask_distance(
 #     intf_tx = intf_tx[intf_tx.tx_mask_distance<tx_mask_d_max].sort_values('tx_mask_distance')
 
 #     intf_tx['pct_exp_celltype'] = intf_tx.apply(
-#         lambda x: percent_pos.loc[x['celltype'],x['gene']], axis=1).values
+#         lambda x: percent_pos.loc[x['cell_type'],x['gene']], axis=1).values
 #     intf_tx['pct_exp_nearby'] = intf_tx.apply(
 #         lambda x: percent_pos.loc[x['neaby_celltype'],x['gene']], axis=1).values
 #     intf_tx['pct_diff'] = intf_tx.pct_exp_nearby - intf_tx.pct_exp_celltype
@@ -262,7 +262,7 @@ def annotate_tx_mask_distance(
 #                 model.fit(fold_change.values.reshape((-1,1)))
 #                 gmm_dict["{}-{}".format(cell_type0, cell_type1)] = model
 #         intf_tx['remove_prob'] = intf_tx.apply(lambda x: mix_norm_cdf(x['pct_diff'],
-#                                                 gmm_dict["{}-{}".format(x['celltype'], x['neaby_celltype'])]), axis=1).values
+#                                                 gmm_dict["{}-{}".format(x['cell_type'], x['neaby_celltype'])]), axis=1).values
 
 #         intf_tx['remove'] = np.random.binomial(1, intf_tx['remove_prob'])
 #     else:
