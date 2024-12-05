@@ -158,9 +158,15 @@ def expression_feature(adata: sc.AnnData,
     exp_1vR_df = exp_1vR_df.explode(column=['gene', 'log2FoldChange', 'padj'])
     exp_1vR_df['padj'] = -np.log10(exp_1vR_df['padj'].astype(float)+1e-7)
     exp_1vR_df['log2FoldChange'] = exp_1vR_df['log2FoldChange'].astype(float)
-
+    # We multiply the two quantities 
     exp_1v1_df['neighbor_self_exp_feature'] = exp_1v1_df['log2FoldChange'] * exp_1v1_df['padj']
     exp_1vR_df['rest_self_exp_feature'] = exp_1vR_df['log2FoldChange'] * exp_1vR_df['padj']
+    # To avoid extreme values, we rank-transform the data and compute the log "odds"
+    exp_1v1_df['neighbor_self_exp_feature'] = exp_1v1_df['neighbor_self_exp_feature'].rank(pct=True)*0.999
+    exp_1v1_df['neighbor_self_exp_feature'] = np.log(exp_1v1_df['neighbor_self_exp_feature']/(1-exp_1v1_df['neighbor_self_exp_feature']))
+    
+    exp_1vR_df['rest_self_exp_feature'] = exp_1vR_df['rest_self_exp_feature'].rank(pct=True)*0.999
+    exp_1vR_df['rest_self_exp_feature'] = np.log(exp_1vR_df['rest_self_exp_feature']/(1-exp_1vR_df['rest_self_exp_feature']))
     
     exp_1v1_df.drop(columns=['log2FoldChange', 'padj'], inplace=True)
     exp_1vR_df.drop(columns=['log2FoldChange', 'padj'], inplace=True)
@@ -210,10 +216,10 @@ def distance_feature(adata: sc.AnnData,
     intf_tx['self_mask_geom'] = cell_coords.loc[intf_tx.cell_id.values, "cell_boundary_geom"].values
     intf_tx['neighbor_mask_geom'] = cell_coords.loc[intf_tx.neighbor_cell_id.values, "cell_boundary_geom"].values
     intf_tx['neighbor_mask_distance'] = distance(intf_tx["tx_geom"], intf_tx['neighbor_mask_geom'])
-    # Get the nearest neighbor 
-    intf_tx.sort_values('neighbor_mask_distance', inplace=True)
-    intf_tx = intf_tx.groupby(['molecule_id'], as_index=False).nth(0).reset_index(drop=True)
-    intf_tx['self_mask_distance'] = distance(intf_tx["tx_geom"], intf_tx['self_mask_geom'].boundary)
+    # Get the overall min distance 
+    min_mask_distance = intf_tx.groupby(['molecule_id'], as_index=False)['neighbor_mask_distance'].min()
+    min_mask_distance.rename(columns={"neighbor_mask_distance": "min_neighbor_mask_distance"}, inplace=True)
+    intf_tx = intf_tx.merge(min_mask_distance, how='left', on="molecule_id")
     
     intf_tx = intf_tx.merge(adata.obs[["leiden","cell_centroid_geom"]], how='left',
                             left_on='cell_id', right_index=True).rename(columns={"leiden": "cell_type",
@@ -223,13 +229,22 @@ def distance_feature(adata: sc.AnnData,
                             left_on='neighbor_cell_id', right_index=True).rename(columns={"leiden": "neighbor_celltype",
                                                                                          "cell_centroid_geom": "neighbor_centroid_geom"},
                                                                     inplace=False)
+    intf_tx = intf_tx[intf_tx['cell_type']!=intf_tx['neighbor_celltype']]
+    # Get the nearest neighbor 
+    intf_tx.sort_values('neighbor_mask_distance', inplace=True)
+    intf_tx = intf_tx.groupby(['molecule_id'], as_index=False).nth(0).reset_index(drop=True)
+    intf_tx['self_mask_distance'] = distance(intf_tx["tx_geom"], intf_tx['self_mask_geom'].boundary)
     
     intf_tx['self_centroid_distance'] = distance(intf_tx['tx_geom'], intf_tx['self_centroid_geom'])
     intf_tx['neighbor_centroid_distance'] = distance(intf_tx['tx_geom'], intf_tx['neighbor_centroid_geom'])
     
     intf_tx['neighbor_mask_distance_rank'] = intf_tx.groupby(['cell_id'])['neighbor_mask_distance'].rank(pct=True) * 0.999
+    intf_tx['self_mask_distance_rank'] = intf_tx.groupby(['cell_id'])['self_mask_distance'].rank(pct=True) * 0.999
+    intf_tx['min_neighbor_mask_distance_rank'] = intf_tx.groupby(['cell_id'])['min_neighbor_mask_distance'].rank(pct=True) * 0.999
     # Compute distance feature
-    intf_tx['distance_feature'] = -np.log10(intf_tx['neighbor_mask_distance_rank'])
+    # intf_tx['distance_feature'] = -np.log10(intf_tx['neighbor_mask_distance_rank'])
+    intf_tx['distance_feature'] = -np.log(intf_tx['neighbor_mask_distance_rank']/(1-intf_tx['neighbor_mask_distance_rank']))
+    intf_tx['prior_distance_feature'] = -np.log(intf_tx['min_neighbor_mask_distance_rank']/(1-intf_tx['min_neighbor_mask_distance_rank']))
     
     return intf_tx
 
@@ -286,15 +301,8 @@ def generate_feature(adata: sc.AnnData,
     # Combine the two piceces of information 
     intf_tx = intf_tx.merge(exp_1v1_df, how='left', 
                             on=['cell_type', "neighbor_celltype", "gene"])
-    # intf_tx.rename(columns={"log2FoldChange": "neighbor_self_log2FoldChange",
-    #                         "padj": "neighbor_self_padj"}, inplace=True)
     intf_tx = intf_tx.merge(exp_1vR_df, how='left',
                             on=['cell_type', "gene"])
-    # intf_tx.rename(columns={"log2FoldChange": "rest_self_log2FoldChange",
-    #                         "padj": "rest_self_padj"}, inplace=True)
-    # # Combine fc and p so that if fc is large and -log10(p) is large it's more likely to be reassigned 
-    # intf_tx['neighbor_self_exp_feature'] = intf_tx['neighbor_self_log2FoldChange'] * intf_tx['neighbor_self_padj']
-    # intf_tx['rest_self_exp_feature'] = intf_tx['rest_self_log2FoldChange'] * intf_tx['rest_self_padj']
     
     return intf_tx 
     

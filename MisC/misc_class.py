@@ -40,7 +40,8 @@ class misc(nn.Module):
                 mask_dist_cutoff: float=1,
                 num_rep: int=3,
                 method: str="split",
-                n_cpus: int=8) -> None:
+                n_cpus: int=8,
+                reparametrize: bool=True) -> None:
         """_summary_
 
         Parameters
@@ -117,13 +118,13 @@ class misc(nn.Module):
         self.current_temperature = self.init_temperature
         self.ANNEAL_RATE = 0.00003
         self.log_interval = 10
-        self.penalty_weight = 0.1
+        # self.penalty_weight = 0.1
         
         # Create parameters 
         self.model_device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+        self.reparametrize = reparametrize
         self.reassign_coefficients = None 
         self.cell_type_coefficients = None 
-        self.distance_prior = None
         self.optimizer = None
         
         
@@ -176,30 +177,33 @@ class misc(nn.Module):
                                         **self.generate_feature_par)
         
     def patchfy_data(self,
-                    half_patch_size_x: float,
-                    half_patch_size_y: float,
-                    n_patches_x: int,
-                    n_patches_y: int) -> None:
+                    percent_cell_per_patch: float=0.01) -> None:
         self.coord_list = generate_patch_coords(adata=self.adata,
-                                                half_patch_size_x=half_patch_size_x,
-                                                half_patch_size_y=half_patch_size_y,
-                                                n_patches_x=n_patches_x,
-                                                n_patches_y=n_patches_y) 
+                                                percent_cell_per_patch=percent_cell_per_patch) 
     
-    def initiate_parameters(self) -> None:
+    def initiate_parameters(self,
+                            prior_50_reassign_prob: float=0.01,
+                            prior_5_reassign_prob: float=0.5) -> None:
         
         # The reassign_coefficients determines the logit of the reassigning probability of a 
         # transcript based on computed features.
         self.reassign_coefficients = nn.Linear(in_features=3, out_features=1, bias=True)
         # Due to the nature of the crafted features, we put a positivity constraint on the coefficients
-        parametrize.register_parametrization(self.reassign_coefficients, "weight", Positive())
+        if self.reparametrize:
+            parametrize.register_parametrization(self.reassign_coefficients, "weight", Positive())
         
+        self.prior_reassign_coefficients = nn.Linear(in_features=1, out_features=1, bias=True)
+        alpha_0 = -np.log(1/prior_50_reassign_prob-1+1e-20)
+        temp = -np.log(0.05/0.95)
+        alpha_1 = (-np.log(1/prior_5_reassign_prob-1+1e-20) - alpha_0)/temp
+        self.prior_reassign_coefficients.bias = nn.Parameter(torch.tensor(alpha_0, dtype=torch.float32).reshape_as(self.prior_reassign_coefficients.bias))
+        self.prior_reassign_coefficients.weight = nn.Parameter(torch.tensor(alpha_1, dtype=torch.float32).reshape_as(self.prior_reassign_coefficients.weight))
+        for param in self.prior_reassign_coefficients.parameters():
+            param.requires_grad = False
         # The cell type coefficients takes the gene counts and outputs the logits for all the cell types 
         self.cell_type_coefficients = nn.Linear(in_features=self.adata.uns['n_genes'], 
                                                 out_features=self.adata.uns['counts_0_n_leiden'],
                                                 bias=True)
-        # 
-        self.distance_prior = Beta(1,10)
         # Adam optimizer
         self.optimizer = optim.Adam(self.parameters(), lr=1e-3)
     
@@ -216,12 +220,16 @@ class misc(nn.Module):
         return reassign_hard, reassign_probs
         
     def decode(self, 
-               updated_cell_by_gene_counts: torch.tensor):
+               updated_cell_by_gene_counts: torch.tensor,
+               prior_distance_features: torch.tensor):
         cell_type_logits = self.cell_type_coefficients(updated_cell_by_gene_counts)
-        return cell_type_logits
+        prior_reassign_logits = self.prior_reassign_coefficients(prior_distance_features)
+        prior_reassign_probs = torch.sigmoid(prior_reassign_logits)
+        return cell_type_logits, prior_reassign_probs
     
     def forward(self,
                 tx_features: torch.tensor, 
+                tx_prior_features: torch.tensor,
                 cell_by_gene_counts: torch.tensor, 
                 row_index_self: torch.tensor,
                 row_index_neighbor: torch.tensor,
@@ -245,38 +253,36 @@ class misc(nn.Module):
         cell_by_gene_counts[ordered_row_index, ordered_col_index] -= update_patch_self.squeeze(1)
         cell_by_gene_counts[ordered_row_index, ordered_col_index] += update_patch_neighbor.squeeze(1)
         
-        cell_type_logits = self.decode(updated_cell_by_gene_counts=cell_by_gene_counts)
+        cell_type_logits, prior_reassign_probs = self.decode(updated_cell_by_gene_counts=cell_by_gene_counts,
+                                                            prior_distance_features=tx_prior_features)
         
-        return reassign_hard, reassign_probs, cell_type_logits
+        return reassign_probs, cell_type_logits, prior_reassign_probs
     
     def loss_function(self,
                       cell_type_logits: torch.tensor, 
                       cell_type_labels: torch.tensor,
-                      reassign_hard: torch.tensor,
                       reassign_probs: torch.tensor,
-                      neighbor_mask_distance_rank: torch.tensor,
+                      prior_reassign_probs: torch.tensor, 
                       verbose: bool=False):
         # Cross entropy loss (despite its name it's a loss)
         CEl = F.cross_entropy(cell_type_logits,
                               cell_type_labels, reduction='mean') 
+        
         # Assume a priori equal probability
-        log_ratio_1 = torch.log(reassign_probs*2+1e-20)
-        log_ratio_0 = torch.log((1-reassign_probs)*2+1e-20)
+        log_ratio_1 = torch.log(reassign_probs/prior_reassign_probs+1e-20)
+        log_ratio_0 = torch.log((1-reassign_probs)/(1-prior_reassign_probs)+1e-20)
         KLD_reassign = torch.sum(reassign_probs * log_ratio_1 + (1-reassign_probs) * log_ratio_0, dim=-1).mean()
         # Can add an entropy term but let's first sit on this idea for a while 
         # entropy = 0.0
-        # penalty = torch.sum(reassign_hard * tx_mask_distance, dim=-1).mean()
-        reassign_ind = torch.nonzero(reassign_hard, as_tuple=True)
-        KLD_dist = -self.distance_prior.log_prob(neighbor_mask_distance_rank[reassign_ind]).mean()
-        
-        l2_regularization = torch.sum(torch.square(self.reassign_coefficients.weight))
+        # l2_regularization = torch.sum(torch.square(self.cell_type_coefficients.weight))
+        # l2_regularization += torch.sum(torch.square(self.reassign_coefficients.weight))
         
         if verbose:
             print("="*30)
             print("The cross entropy loss is {} and KLD_reassign is {}".format(CEl.detach().numpy(), 
                                                                       KLD_reassign.detach().numpy()))
             print("="*30) 
-        return CEl + KLD_reassign + KLD_dist + l2_regularization
+        return CEl + KLD_reassign
     
     def training_loop(self,
                       n_epochs: int,
@@ -287,23 +293,23 @@ class misc(nn.Module):
             self.current_temperature = self.init_temperature
             train_loss = 0.0
             for minibatch_ind, coord in enumerate(self.coord_list):
-                cell_by_gene_counts, tx_features, cell_type_labels, row_index_self, row_index_neighbor, col_index, neighbor_mask_distance_rank = load_patch(adata=self.adata,
-                                                                                                                                                            intf_tx=self.intf_tx,
-                                                                                                                                                            coord_tuple=coord,
-                                                                                                                                                            layer=self.current_layer,
-                                                                                                                                                            model_device=self.model_device)
-                reassign_hard, reassign_probs, cell_type_logits = self(tx_features=tx_features, 
-                                                                        cell_by_gene_counts=cell_by_gene_counts, 
-                                                                        row_index_self=row_index_self,
-                                                                        row_index_neighbor=row_index_neighbor,
-                                                                        col_index=col_index,
-                                                                        temperature=self.current_temperature)
+                cell_by_gene_counts, tx_features, tx_prior_features, cell_type_labels, row_index_self, row_index_neighbor, col_index = load_patch(adata=self.adata,
+                                                                                                                                intf_tx=self.intf_tx,
+                                                                                                                                coord_tuple=coord,
+                                                                                                                                layer=self.current_layer,
+                                                                                                                                model_device=self.model_device)
+                reassign_probs, cell_type_logits, prior_reassign_probs = self(tx_features=tx_features, 
+                                                                            tx_prior_features=tx_prior_features,                
+                                                                            cell_by_gene_counts=cell_by_gene_counts, 
+                                                                            row_index_self=row_index_self,
+                                                                            row_index_neighbor=row_index_neighbor,
+                                                                            col_index=col_index,
+                                                                            temperature=self.current_temperature)
                 self.optimizer.zero_grad()
                 loss = self.loss_function(cell_type_logits=cell_type_logits,
                                           cell_type_labels=cell_type_labels,
-                                          reassign_hard=reassign_hard,
                                           reassign_probs=reassign_probs,
-                                          neighbor_mask_distance_rank=neighbor_mask_distance_rank,
+                                          prior_reassign_probs=prior_reassign_probs,
                                           verbose=verbose)
                 loss.backward()
                 train_loss += loss.item()
@@ -312,10 +318,10 @@ class misc(nn.Module):
                     self.current_temperature = np.maximum(self.current_temperature * np.exp(-self.ANNEAL_RATE * minibatch_ind), self.min_temperature) 
 
                 if minibatch_ind % self.log_interval == 0:
-                    print('Train Epoch: {} [{}/{} ({:.0f}%)]tLoss: {:.6f}'.format(
+                    print('Train Epoch: {} [{}/{} ({:.0f}%)]tLoss: {:.6f} Training Loss: {:.6f}'.format(
                             epoch, minibatch_ind, len(self.coord_list),
                                 100. * minibatch_ind / len(self.coord_list),
-                                loss.item()))
+                                loss.item(), train_loss))
             print('====> Epoch: {} Average loss: {:.4f}'.format(
                     epoch, train_loss / len(self.coord_list)))
 
@@ -341,11 +347,12 @@ class misc(nn.Module):
             for criterion_name in criteria: 
                 criterion = criteria[criterion_name]
                 if isinstance(criterion, str):
-                    self.intf_tx['reassign'] = (reassign_hard.squeeze(1)) 
+                    self.intf_tx['reassign'] = (reassign_hard.squeeze(-1)) 
                 else:
-                    self.intf_tx['reassign'] = (reassign_probs.squeeze(1)>criterion)  
+                    self.intf_tx['reassign'] = (reassign_probs.squeeze(-1)>criterion)  
                 tx_to_reassign = self.intf_tx.loc[self.intf_tx['reassign']==1, 
                                                     ['molecule_id', 'cell_id', 'neighbor_cell_id', "gene"]]
+                self.intf_tx.drop(columns=['reassign'], inplace=True)
                 trial_layer = self.current_layer+"_"+criterion_name
                 self.tx_to_reassign_dict[trial_layer] = tx_to_reassign.copy()
                 self.adata = make_reassignment_adata(adata=self.adata,
@@ -365,41 +372,59 @@ class misc(nn.Module):
         layer_num = extract_layer_num(self.current_layer)
         self.current_layer = "counts_"+str(int(layer_num+1))
 
+    def recluster(self):
+        pass 
+    
+    
     def save_model(self,
-                   path: str,
-                   save_data: bool=True) -> None:
+                   path: str) -> None:
         dir_name = os.path.dirname(path)
         torch.save({
             'model_state_dict': self.state_dict(),
             'optimizer_state_dict': self.optimizer.state_dict()
             }, path)
-        if save_data:
-            self.adata.write_h5ad(os.path.join(dir_name, "adata.h5ad"))
-            self.tx_metadata.to_parquet(os.path.join(dir_name, "tx_metadata.parquet"),
-                                        index=True)
-            self.cell_coords.to_parquet(os.path.join(dir_name, "cell_coords.parquet"),
-                                        index=True)
-            self.mask_distance.to_parquet(os.path.join(dir_name, "mask_distance.parquet"),
-                                        index=True)
-            self.intf_tx.to_parquet(os.path.join(dir_name, "intf_tx.parquet"),
+        # Since h5ad does not support saving geopandas 
+        self.adata.obs = pd.DataFrame(self.adata.obs)
+        self.adata.obs.drop(columns=['cell_centroid_geom'], inplace=True)
+        self.adata.write_h5ad(os.path.join(dir_name, "adata.h5ad"))
+        self.adata.obs = gpd.GeoDataFrame(self.adata.obs,
+                                geometry=gpd.points_from_xy(self.adata.obs['x'], self.adata.obs['y']))
+        self.adata.obs.rename_geometry("cell_centroid_geom", inplace=True)
+        
+        # Then other files 
+        self.tx_metadata.to_parquet(os.path.join(dir_name, "tx_metadata.parquet"),
                                     index=True)
-            with open(os.path.join(dir_name, "tx_to_reassign_dict.json"), "w") as f:
-                json.dump(self.tx_to_reassign_dict, f, cls=JSONEncoder)
+        self.cell_coords.to_parquet(os.path.join(dir_name, "cell_coords.parquet"),
+                                    index=True)
+        self.mask_distance.to_parquet(os.path.join(dir_name, "mask_distance.parquet"),
+                                    index=True)
+        self.intf_tx.to_parquet(os.path.join(dir_name, "intf_tx.parquet"),
+                                index=True)
+        with open(os.path.join(dir_name, "tx_to_reassign_dict.json"), "w") as f:
+            json.dump(self.tx_to_reassign_dict, f, cls=JSONEncoder)
         
     def load_model(self,
-                   path: str,
-                   load_data: bool=True) -> None:
+                   path: str) -> None:
         dir_name = os.path.dirname(path)
+        self.adata = sc.read_h5ad(os.path.join(dir_name, "adata.h5ad"))
+        # Reconstruct the geodataframe 
+        self.adata.obs = gpd.GeoDataFrame(self.adata.obs,
+                                geometry=gpd.points_from_xy(self.adata.obs['x'], self.adata.obs['y']))
+        self.adata.obs.rename_geometry("cell_centroid_geom", inplace=True)
+        
+        self.initiate_parameters()
         checkpoint = torch.load(path) 
         self.load_state_dict(checkpoint['model_state_dict'])
         self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-        if load_data:
-            self.adata = sc.read_h5ad(os.path.join(dir_name, "adata.h5ad"))
-            self.tx_metadata = read_parquet(os.path.join(dir_name, "tx_metadata.parquet"))
-            self.cell_coords = read_parquet(os.path.join(dir_name, "cell_coords.parquet"))
-            self.mask_distance = read_parquet(os.path.join(dir_name, "mask_distance.parquet"))
-            self.intf_tx = read_parquet(os.path.join(dir_name, "intf_tx.parquet"))
-            self.tx_to_reassign_dict = json.load(open(dir_name, "tx_to_reassign_dict.json"))
-            # Then convert into dataframes 
+        
+        # Other files 
+        self.tx_metadata = read_parquet(os.path.join(dir_name, "tx_metadata.parquet"))
+        self.cell_coords = read_parquet(os.path.join(dir_name, "cell_coords.parquet"))
+        self.mask_distance = read_parquet(os.path.join(dir_name, "mask_distance.parquet"))
+        self.intf_tx = read_parquet(os.path.join(dir_name, "intf_tx.parquet"))
+        self.tx_to_reassign_dict = json.load(open(os.path.join(dir_name, "tx_to_reassign_dict.json")))
+        # Then convert into dataframes 
+        for k in self.tx_to_reassign_dict:
+            self.tx_to_reassign_dict[k] = pd.read_json(self.tx_to_reassign_dict[k])
             
     

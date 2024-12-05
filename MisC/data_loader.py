@@ -2,34 +2,28 @@ import numpy as np
 import pandas as pd 
 import torch 
 
+# Can also construct based on RAM
+# Set an upper limit  we can decide on the percentage 
 
 def generate_patch_coords(adata,
-                          half_patch_size_x,
-                          half_patch_size_y,
-                          n_patches_x,
-                          n_patches_y):
+                          percent_cell_per_patch: float=0.01):
     coord_list = []
-    center_x_array = np.linspace(start=adata.uns['centroid_x_min']-10,
-                                 stop=adata.uns['centroid_x_max']+10,
-                                 num=n_patches_x)
-    dx = center_x_array[1] - center_x_array[0]
-    half_patch_size_x = np.max([dx/2, half_patch_size_x])
-    center_y_array = np.linspace(start=adata.uns['centroid_y_min']-10,
-                                 stop=adata.uns['centroid_y_max']+10,
-                                 num=n_patches_y)
-    dy = center_x_array[1] - center_x_array[0]
-    half_patch_size_y = np.max([dy/2, half_patch_size_y])
-        
-    for center_x in center_x_array:
-        for center_y in center_y_array:
-            left_x = center_x - half_patch_size_x
-            right_x = center_x + half_patch_size_x
-            bottom_y = center_y - half_patch_size_y
-            top_y = center_y + half_patch_size_y
-            
+    dx = (adata.uns['centroid_x_max']-adata.uns['centroid_x_min'])*np.sqrt(percent_cell_per_patch)
+    dy = (adata.uns['centroid_y_max']-adata.uns['centroid_y_min'])*np.sqrt(percent_cell_per_patch)
+    left_x_array = np.arange(start=adata.uns['centroid_x_min']-dx/10,
+                            stop=adata.uns['centroid_x_max']+dx/10,
+                            step=dx/10)
+    bottom_y_array = np.arange(start=adata.uns['centroid_y_min']-dy/10,
+                            stop=adata.uns['centroid_y_max']+dy/10,
+                            step=dy/10)
+    for left_x in left_x_array:
+        for bottom_y in bottom_y_array:
+            right_x = left_x + dx
+            top_y = bottom_y + dy
             ind = (adata.obs['x']>left_x) & (adata.obs['x']<right_x) & (adata.obs['y']>bottom_y) & (adata.obs['y']<top_y)
-            if ind.sum() > 100:
+            if ind.sum() > 10:
                 coord_list.append((left_x, right_x, bottom_y, top_y))
+        
     return coord_list
 
 
@@ -67,13 +61,15 @@ def load_patch(adata,
                                          "neighbor_self_exp_feature", 
                                          "rest_self_exp_feature"]].values, 
                                dtype=torch.float32, device=model_device)
+    tx_prior_features = torch.tensor(tx_patch[['prior_distance_feature']].values,
+                                     dtype=torch.float32, device=model_device)
     row_index_self = torch.LongTensor(tx_patch[['row_index_self']].values, device=model_device)
     row_index_neighbor = torch.LongTensor(tx_patch[['row_index_neighbor']].values, device=model_device)
     col_index = torch.LongTensor(tx_patch[['col_index']].values, device=model_device)
-    neighbor_mask_distance_rank = torch.tensor(tx_patch[['neighbor_mask_distance_rank']].values,
-                                                dtype=torch.float32, device=model_device)
+    # neighbor_mask_distance_rank = torch.tensor(tx_patch[['neighbor_mask_distance_rank']].values,
+    #                                             dtype=torch.float32, device=model_device)
     
-    return cell_by_gene_counts, tx_features, cell_type_labels, row_index_self, row_index_neighbor, col_index, neighbor_mask_distance_rank
+    return cell_by_gene_counts, tx_features, tx_prior_features, cell_type_labels, row_index_self, row_index_neighbor, col_index
     
     
 

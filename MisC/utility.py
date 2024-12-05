@@ -225,24 +225,37 @@ def calculate_mask_distance(adata: sc.AnnData,
     # For each cell, we record its neighbors as a list
     adj = adj.agg(lambda x: adj.columns[x.values].tolist(), axis=1)
     adj = pd.DataFrame(adj, columns = ['n'])
-    # We further exclude cells from the same cell cluster
-    # since we are only interested in comparing the transcript abundances among cells of different types 
-    adj = adj.agg(lambda x: [
-            y for y in x.n if adata.obs.loc[y, 'leiden']!=adata.obs.loc[x.name, 'leiden']], axis=1)
-    # We then exclude cells surrounded by cells of its own type 
-    adj_nonself = adj[adj.apply(len)>0]
+    adj = adj[adj['n'].apply(len)>0]
     # Then we compute the cell-cell distance based on their masks
-    adj_nonself_masks_ids = adj_nonself.explode()
+    adj_masks_ids = adj.explode(column=['n'])
     md = distance(
-        cell_coords.loc[adj_nonself_masks_ids.index, "cell_boundary_geom"].values,
-        cell_coords.loc[adj_nonself_masks_ids.values, "cell_boundary_geom"].values
+        cell_coords.loc[adj_masks_ids.index, "cell_boundary_geom"].values,
+        cell_coords.loc[adj_masks_ids['n'].values, "cell_boundary_geom"].values
     )
-    mask_distance = gpd.GeoDataFrame(
-        adj_nonself_masks_ids, columns=['neighbor_cell_id'])
+    mask_distance = gpd.GeoDataFrame(adj_masks_ids).rename(columns={"n": "neighbor_cell_id"})
     mask_distance['mask_distance'] = md
-    mask_distance.reset_index(inplace=True)
+    mask_distance.reset_index(inplace=True, drop=False)
     mask_distance = mask_distance.merge(adata.obs[['x', 'y', 'cell_centroid_geom']], how='left', 
                                         left_on='cell_id', right_index=True).set_geometry("cell_centroid_geom")
+    ###############################################################
+    # # We further exclude cells from the same cell cluster
+    # # since we are only interested in comparing the transcript abundances among cells of different types 
+    # adj = adj.agg(lambda x: [
+    #         y for y in x.n if adata.obs.loc[y, 'leiden']!=adata.obs.loc[x.name, 'leiden']], axis=1)
+    # We then exclude cells surrounded by cells of its own type 
+    # adj_nonself = adj[adj.apply(len)>0]
+    # # Then we compute the cell-cell distance based on their masks
+    # adj_nonself_masks_ids = adj_nonself.explode()
+    # md = distance(
+    #     cell_coords.loc[adj_nonself_masks_ids.index, "cell_boundary_geom"].values,
+    #     cell_coords.loc[adj_nonself_masks_ids['n'].values, "cell_boundary_geom"].values
+    # )
+    # mask_distance = gpd.GeoDataFrame(
+    #     adj_nonself_masks_ids, columns=['neighbor_cell_id'])
+    # mask_distance['mask_distance'] = md
+    # mask_distance.reset_index(inplace=True)
+    # mask_distance = mask_distance.merge(adata.obs[['x', 'y', 'cell_centroid_geom']], how='left', 
+    #                                     left_on='cell_id', right_index=True).set_geometry("cell_centroid_geom")
     return mask_distance
 
 
@@ -309,8 +322,8 @@ def make_reassignment_adata(adata: sc.AnnData,
     """
     counts_to_subtract, counts_to_add = generate_count_patches(adata=adata,
                                                                tx_to_reassign=tx_to_reassign)
+    layer_num = extract_layer_num(layer)
     if trial_layer is None:
-        layer_num = extract_layer_num(layer)
         trial_layer = "counts_"+str(int(layer_num+1))
         
     # Update adata
