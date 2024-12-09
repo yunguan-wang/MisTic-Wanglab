@@ -122,7 +122,8 @@ def import_data(cell_by_gene_counts: Union[str, pd.DataFrame],
     else: 
         raise TypeError("Only .parquet file or geopandas dataframe is allowed")
     cell_coords.index.rename(name='cell_id', inplace=True)
-    cell_coords.rename_geometry("cell_boundary_geom", inplace=True)
+    if cell_coords.geometry.name != "cell_boundary_geom":
+        cell_coords.rename_geometry("cell_boundary_geom", inplace=True)
     # Transcript information 
     # We also convert the pandas dataframe to geopandas geodataframe 
     # by constructing points from the locations of each transcript
@@ -139,9 +140,10 @@ def import_data(cell_by_gene_counts: Union[str, pd.DataFrame],
         tx_metadata = gpd.GeoDataFrame(tx_metadata, 
                                        geometry=gpd.points_from_xy(tx_metadata[tx_x_col], tx_metadata[tx_y_col]))
         
-        tx_metadata.index = ['tx_' + str(i+1) for i in range(tx_metadata.shape[0])]
-        tx_metadata['molecule_id'] = tx_metadata.index
-    tx_metadata.rename_geometry("tx_geom", inplace=True)
+    tx_metadata.index = ['tx_' + str(i+1) for i in range(tx_metadata.shape[0])]
+    tx_metadata['molecule_id'] = tx_metadata.index
+    if tx_metadata.geometry.name != "tx_geom":
+        tx_metadata.rename_geometry("tx_geom", inplace=True)
     tx_metadata.rename(
         columns={
             gene_col: 'gene',

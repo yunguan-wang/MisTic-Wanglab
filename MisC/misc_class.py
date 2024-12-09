@@ -345,6 +345,7 @@ class misc(nn.Module):
                 reassign_hard = np.vstack([reassign_hard, reassign_hard_chunk.numpy()])
                 reassign_probs = np.vstack([reassign_probs, reassign_probs_chunk.numpy()])
             
+            self.intf_tx['reassign_probs'] = reassign_probs.squeeze(-1)
             for criterion_name in criteria: 
                 criterion = criteria[criterion_name]
                 if isinstance(criterion, str):
@@ -373,9 +374,32 @@ class misc(nn.Module):
         layer_num = extract_layer_num(self.current_layer)
         self.current_layer = "counts_"+str(int(layer_num+1))
 
-    def recluster(self):
-        pass 
-    
+    def recluster(self,
+                  temperature=0.0,
+                  top_k=None,
+                  new_layer: Optional[str]=None):
+        if new_layer is None:
+            new_layer = self.current_layer
+        self.eval()
+        with torch.no_grad():
+            logits = self.cell_type_coefficients(torch.tensor(self.adata.layers[new_layer].values,
+                                                            dtype=torch.float32, 
+                                                            device=self.model_device))
+            if top_k is not None:
+                top_logits, _ = torch.topk(logits, top_k)
+                min_val = top_logits[:, -1]
+                logits = torch.where(
+                    logits < min_val,
+                    torch.tensor(float('-inf')).to(logits.device),
+                    logits
+                )
+            if temperature > 0.0:
+                logits = logits/temperature
+                probs = torch.softmax(logits, dim=-1)
+                cell_type_predict = torch.multinomial(probs, num_samples=1)
+            else:
+                cell_type_predict = torch.argmax(logits, dim=-1, keepdim=True)
+        return cell_type_predict
     
     def save_model(self,
                    path: str) -> None:
