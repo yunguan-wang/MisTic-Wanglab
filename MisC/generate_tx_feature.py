@@ -8,6 +8,7 @@ from itertools import combinations
 from pydeseq2.dds import DeseqDataSet
 from pydeseq2.default_inference import DefaultInference
 from pydeseq2.ds import DeseqStats
+from pydeseq2.utils import get_num_processes
 from shapely import distance
 # User entertainment
 from tqdm.auto import tqdm
@@ -18,8 +19,7 @@ from typing import Tuple
 def expression_feature(adata: sc.AnnData,
                         layer: str,
                         num_rep: int=3,
-                        method: str="split",
-                        n_cpus: int=8) -> Tuple[pd.DataFrame, pd.DataFrame]:
+                        method: str="split") -> Tuple[pd.DataFrame, pd.DataFrame]:
     """Use deseq2 with pseudo bulks to perform differential analysis among different cell types and cell type vs all other cell types 
 
     Parameters
@@ -32,8 +32,6 @@ def expression_feature(adata: sc.AnnData,
         Number of repetitions in case of method='bootstrap' or number of chuns in case of method='split', by default 3
     method : str, optional
         The method to generate pseudo bulks, by default "split"
-    n_cpus : int, optional
-        Number of CPUs to be used for deseq2, by default 8
 
     Returns
     -------
@@ -41,7 +39,7 @@ def expression_feature(adata: sc.AnnData,
         Differential analysis results 
     """
     assert method in ['split', 'bootstrap'], "method has to be either split or bootstrap"
-    
+    n_cpus = get_num_processes(n_cpus=None)
     # To prepare for one-vs-rest comparison, we first construct an augmented dataframe 
     # where the trailing samples are just the original counts that belong to 
     # all the cells except for one type 
@@ -257,8 +255,7 @@ def generate_feature(adata: sc.AnnData,
                     mask_distance: pd.DataFrame, 
                     mask_dist_cutoff: float=1,
                     num_rep: int=3,
-                    method: str="split",
-                    n_cpus: int=8) -> gpd.GeoDataFrame:
+                    method: str="split") -> gpd.GeoDataFrame:
     """A wrap up function for expression_feature and distance_feature 
 
     Parameters
@@ -279,8 +276,6 @@ def generate_feature(adata: sc.AnnData,
         Number of repetitions in case of method='bootstrap' or number of chuns in case of method='split', by default 3
     method : str, optional
         The method to generate pseudo bulks, by default "split"
-    n_cpus : int, optional
-        Number of CPUs to be used for deseq2, by default 8
     Returns
     -------
     gpd.GeoDataFrame
@@ -296,8 +291,7 @@ def generate_feature(adata: sc.AnnData,
     exp_1v1_df, exp_1vR_df = expression_feature(adata=adata,
                                                 layer=layer,
                                                 num_rep=num_rep,
-                                                method=method,
-                                                n_cpus=n_cpus)
+                                                method=method)
     # Combine the two piceces of information 
     intf_tx = intf_tx.merge(exp_1v1_df, how='left', 
                             on=['cell_type', "neighbor_celltype", "gene"])

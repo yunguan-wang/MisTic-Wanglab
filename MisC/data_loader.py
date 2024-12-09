@@ -46,8 +46,8 @@ def trial_patch_coords(adata,
         
     bottom_y_ind_array, left_x_ind_array = np.where(n_cells > 10)
 
-    offset_x = n_cells.shape[0] - coord_ind_matrix.shape[0] 
-    offset_y = n_cells.shape[1] - coord_ind_matrix.shape[1] 
+    offset_x = n_cells_per_patch.shape[0] - coord_ind_matrix.shape[0] 
+    offset_y = n_cells_per_patch.shape[1] - coord_ind_matrix.shape[1] 
 
     non_edge = np.where((bottom_y_ind_array>=offset_x) &\
                         (left_x_ind_array>=offset_y))[0]
@@ -91,24 +91,6 @@ def generate_patch_coords(adata,
             percent_cell_per_patch *= 0.9
         
     return coord_list
-    
-    # left_x_array = np.arange(start=adata.uns['centroid_x_min']-dx/10,
-    #                         stop=adata.uns['centroid_x_max']+dx/10,
-    #                         step=dx/10)
-    # bottom_y_array = np.arange(start=adata.uns['centroid_y_min']-dy/10,
-    #                         stop=adata.uns['centroid_y_max']+dy/10,
-    #                         step=dy/10)
-    # for left_x in left_x_array:
-    #     for bottom_y in bottom_y_array:
-    #         right_x = left_x + dx
-    #         top_y = bottom_y + dy
-    #         ind = (adata.obs['x']>left_x) & (adata.obs['x']<right_x) &\
-    #                 (adata.obs['y']>bottom_y) & (adata.obs['y']<top_y) &\
-    #                 (adata.obs.index.isin(intf_tx['cell_id']))
-    #         if ind.sum() > 10:
-    #             coord_list.append((left_x, right_x, bottom_y, top_y))
-        
-    # return coord_list
 
 
 def load_patch(adata, 

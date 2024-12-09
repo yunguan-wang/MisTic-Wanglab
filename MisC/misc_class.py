@@ -40,7 +40,6 @@ class misc(nn.Module):
                 mask_dist_cutoff: float=1,
                 num_rep: int=3,
                 method: str="split",
-                n_cpus: int=8,
                 reparametrize: bool=True) -> None:
         """_summary_
 
@@ -74,8 +73,6 @@ class misc(nn.Module):
             Number of pseudo bulks, by default 3
         method : str, optional
             Method to generate pseudo bulks. Can be split or bootstrap, by default "split"
-        n_cpus : int, optional
-            Number of cpus to be used in deseq2 differential analysis, by default 8
         """
         super().__init__()
         
@@ -98,8 +95,7 @@ class misc(nn.Module):
         self.generate_feature_par = {
             'mask_dist_cutoff': mask_dist_cutoff,
             'num_rep': num_rep,
-            'method': method,
-            'n_cpus': n_cpus
+            'method': method
         }
         
         # Create data 
@@ -118,12 +114,12 @@ class misc(nn.Module):
         self.current_temperature = self.init_temperature
         self.ANNEAL_RATE = 0.00003
         self.log_interval = 10
-        # self.penalty_weight = 0.1
         
         # Create parameters 
         self.model_device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
         self.reparametrize = reparametrize
         self.reassign_coefficients = None 
+        self.prior_reassign_coefficients = None
         self.cell_type_coefficients = None 
         self.optimizer = None
         
@@ -176,11 +172,8 @@ class misc(nn.Module):
                                         mask_distance=self.mask_distance,
                                         **self.generate_feature_par)
         
-    def patchfy_data(self,
-                    percent_cell_per_patch: float=0.01) -> None:
-        self.coord_list = generate_patch_coords(adata=self.adata,
-                                                intf_tx=self.intf_tx,
-                                                percent_cell_per_patch=percent_cell_per_patch) 
+    def patchfy_data(self) -> None:
+        self.coord_list = generate_patch_coords(adata=self.adata, intf_tx=self.intf_tx) 
     
     def initiate_parameters(self,
                             prior_50_reassign_prob: float=0.01,
@@ -269,14 +262,9 @@ class misc(nn.Module):
         CEl = F.cross_entropy(cell_type_logits,
                               cell_type_labels, reduction='mean') 
         
-        # Assume a priori equal probability
         log_ratio_1 = torch.log(reassign_probs/prior_reassign_probs+1e-20)
         log_ratio_0 = torch.log((1-reassign_probs)/(1-prior_reassign_probs)+1e-20)
         KLD_reassign = torch.sum(reassign_probs * log_ratio_1 + (1-reassign_probs) * log_ratio_0, dim=-1).mean()
-        # Can add an entropy term but let's first sit on this idea for a while 
-        # entropy = 0.0
-        # l2_regularization = torch.sum(torch.square(self.cell_type_coefficients.weight))
-        # l2_regularization += torch.sum(torch.square(self.reassign_coefficients.weight))
         
         if verbose:
             print("="*30)
@@ -328,8 +316,8 @@ class misc(nn.Module):
 
     def trial_reassign_tx(self,
                           criteria: dict) -> None:
+        self.eval()
         with torch.no_grad():
-            self.eval()
             tx_features_chunks = even_split(array=self.intf_tx[['distance_feature', 
                                             "neighbor_self_exp_feature", 
                                             "rest_self_exp_feature"]].values,
@@ -382,24 +370,33 @@ class misc(nn.Module):
             new_layer = self.current_layer
         self.eval()
         with torch.no_grad():
-            logits = self.cell_type_coefficients(torch.tensor(self.adata.layers[new_layer].values,
-                                                            dtype=torch.float32, 
-                                                            device=self.model_device))
-            if top_k is not None:
-                top_logits, _ = torch.topk(logits, top_k)
-                min_val = top_logits[:, -1]
-                logits = torch.where(
-                    logits < min_val,
-                    torch.tensor(float('-inf')).to(logits.device),
-                    logits
-                )
-            if temperature > 0.0:
-                logits = logits/temperature
-                probs = torch.softmax(logits, dim=-1)
-                cell_type_predict = torch.multinomial(probs, num_samples=1)
-            else:
-                cell_type_predict = torch.argmax(logits, dim=-1, keepdim=True)
-        return cell_type_predict
+            cell_by_gene_counts_chunks = even_split(array=self.adata.layers[new_layer].values,
+                                                    chunk_size=1000)
+            logits = torch.empty((0, self.adata.uns["counts_0_n_leiden"]), dtype=torch.float32)
+            cell_type_predict = torch.empty((0, 1), dtype=torch.int64)
+            for cell_by_gene_counts_chunk in cell_by_gene_counts_chunks:
+                logits_chunk = self.cell_type_coefficients(torch.tensor(cell_by_gene_counts_chunk,
+                                                                dtype=torch.float32, 
+                                                                device=self.model_device))
+                logits = torch.cat((logits, logits_chunk), dim=0)
+                
+                if top_k is not None:
+                    top_logits, _ = torch.topk(logits_chunk, top_k)
+                    min_val = top_logits[:, -1]
+                    logits_chunk = torch.where(
+                        logits_chunk < min_val,
+                        torch.tensor(float('-inf')).to(logits.device),
+                        logits_chunk
+                    )
+                if temperature > 0.0:
+                    logits_chunk = logits_chunk/temperature
+                    probs = torch.softmax(logits_chunk, dim=-1)
+                    cell_type_predict_chunk = torch.multinomial(probs, num_samples=1)
+                else:
+                    cell_type_predict_chunk = torch.argmax(logits_chunk, dim=-1, keepdim=True)
+                cell_type_predict = torch.cat((cell_type_predict, cell_type_predict_chunk), dim=0)
+                
+        return cell_type_predict.numpy(), logits.numpy()
     
     def save_model(self,
                    path: str) -> None:
