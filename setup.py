@@ -13,18 +13,21 @@ else:
     raise RuntimeError("Unable to find version string in %s." % (VERSIONFILE,))
 # Authors
 AURE = r"^__author__ = ['\"]([^'\"]*)['\"]"
+mo = re.search(AURE, verstrline, re.M)
 if mo:
     AUTHORS = mo.group(1)
 else:
     raise RuntimeError("Unable to find author string in %s." % (VERSIONFILE,))
 # Description
 DESRE = r"^__description__ = ['\"]([^'\"]*)['\"]"
+mo = re.search(DESRE, verstrline, re.M)
 if mo:
     DESCRIPTION = mo.group(1)
 else:
     raise RuntimeError("Unable to find description string in %s." % (VERSIONFILE,))
 # Title 
 TITRE = r"^__title__ = ['\"]([^'\"]*)['\"]"
+mo = re.search(TITRE, verstrline, re.M)
 if mo:
     TITLE = mo.group(1)
 else:
@@ -32,6 +35,7 @@ else:
 
 # Title 
 AUEMRE = r"^__authoremail__ = ['\"]([^'\"]*)['\"]"
+mo = re.search(AUEMRE, verstrline, re.M)
 if mo:
     AUTHOREMAIL = mo.group(1)
 else:

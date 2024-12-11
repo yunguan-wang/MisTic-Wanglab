@@ -116,6 +116,8 @@ def import_data(cell_metadata: Union[str, pd.DataFrame],
     cell_coords.index.rename(name='cell_id', inplace=True)
     if cell_coords.geometry.name != "cell_boundary_geom":
         cell_coords.rename_geometry("cell_boundary_geom", inplace=True)
+    # Remove potential duplicated vertices in a polygon
+    cell_coords['cell_boundary_geom'] = cell_coords['cell_boundary_geom'].remove_repeated_points(tolerance=0.0)
     # Transcript information 
     # We also convert the pandas dataframe to geopandas geodataframe 
     # by constructing points from the locations of each transcript
