@@ -240,7 +240,6 @@ def distance_feature(adata: sc.AnnData,
     intf_tx['self_mask_distance_rank'] = intf_tx.groupby(['cell_id'])['self_mask_distance'].rank(pct=True) * 0.999
     intf_tx['min_neighbor_mask_distance_rank'] = intf_tx.groupby(['cell_id'])['min_neighbor_mask_distance'].rank(pct=True) * 0.999
     # Compute distance feature
-    # intf_tx['distance_feature'] = -np.log10(intf_tx['neighbor_mask_distance_rank'])
     intf_tx['distance_feature'] = -np.log(intf_tx['neighbor_mask_distance_rank']/(1-intf_tx['neighbor_mask_distance_rank']))
     intf_tx['prior_distance_feature'] = -np.log(intf_tx['min_neighbor_mask_distance_rank']/(1-intf_tx['min_neighbor_mask_distance_rank']))
     

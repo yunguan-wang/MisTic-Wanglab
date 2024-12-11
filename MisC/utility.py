@@ -51,10 +51,10 @@ def process_adata(adata: sc.AnnData,
     return adata
 
 
-def import_data(cell_by_gene_counts: Union[str, pd.DataFrame],
-                cell_metadata: Union[str, pd.DataFrame],
+def import_data(cell_metadata: Union[str, pd.DataFrame],
                 cell_boundary_polygons: Union[str, gpd.GeoDataFrame],
                 detected_transcripts: Union[str, pd.DataFrame, gpd.GeoDataFrame],
+                cell_by_gene_counts: Optional[Union[str, pd.DataFrame]]=None,
                 cell_centroid_x_col: str='center_x',
                 cell_centroid_y_col: str='center_y',
                 tx_x_col: str='global_x',
@@ -95,15 +95,7 @@ def import_data(cell_by_gene_counts: Union[str, pd.DataFrame],
     Tuple[sc.AnnData, gpd.GeoDataFrame, gpd.GeoDataFrame]
         An AnnData object containing the original counts and some metainformation. The detected transcript as well as the polygons. 
     """
-    
-    # Cell by gene counts matrix 
-    if isinstance(cell_by_gene_counts, str) and ("csv" in os.path.splitext(cell_by_gene_counts)[1]):
-        counts = pd.read_csv(cell_by_gene_counts, index_col=0)
-    elif isinstance(cell_by_gene_counts, pd.DataFrame):
-        counts = cell_by_gene_counts
-    else: 
-        raise TypeError("Only .csv file or pandas dataframe is allowed")
-    counts.index.rename(name='cell_id', inplace=True)
+
     # Cell metadata
     if isinstance(cell_metadata, str) and ("csv" in os.path.splitext(cell_metadata)[1]):
         cell_meta = pd.read_csv(cell_metadata, index_col=0)
@@ -113,7 +105,7 @@ def import_data(cell_by_gene_counts: Union[str, pd.DataFrame],
         raise TypeError("Only .csv file or pandas dataframe is allowed")
     cell_meta.index.rename(name='cell_id', inplace=True)
     cell_meta.rename(columns={cell_centroid_x_col: "center_x",
-                              cell_centroid_y_col: "center_y"}, inplace=True)
+                              cell_centroid_y_col: "center_y"}, inplace=True, errors='raise')
     # Polygons of cells 
     if isinstance(cell_boundary_polygons, str) and ("parquet" in os.path.splitext(cell_boundary_polygons)[1]):
         cell_coords = read_parquet(cell_boundary_polygons)
@@ -139,8 +131,9 @@ def import_data(cell_by_gene_counts: Union[str, pd.DataFrame],
     if not isinstance(tx_metadata, gpd.GeoDataFrame):
         tx_metadata = gpd.GeoDataFrame(tx_metadata, 
                                        geometry=gpd.points_from_xy(tx_metadata[tx_x_col], tx_metadata[tx_y_col]))
-        
-    tx_metadata.index = ['tx_' + str(i+1) for i in range(tx_metadata.shape[0])]
+    
+    tx_metadata.reset_index(drop=True, inplace=True)
+    tx_metadata.index = "tx_" + tx_metadata.index.astype(str)
     tx_metadata['molecule_id'] = tx_metadata.index
     if tx_metadata.geometry.name != "tx_geom":
         tx_metadata.rename_geometry("tx_geom", inplace=True)
@@ -148,7 +141,21 @@ def import_data(cell_by_gene_counts: Union[str, pd.DataFrame],
         columns={
             gene_col: 'gene',
             cell_col: 'cell_id'
-            }, inplace=True)
+            }, inplace=True, errors='raise')
+    # Cell by gene counts matrix 
+    if cell_by_gene_counts is not None:
+        if isinstance(cell_by_gene_counts, str) and ("csv" in os.path.splitext(cell_by_gene_counts)[1]):
+            counts = pd.read_csv(cell_by_gene_counts, index_col=0)
+        elif isinstance(cell_by_gene_counts, pd.DataFrame):
+            counts = cell_by_gene_counts
+        else: 
+            raise TypeError("Only .csv file or pandas dataframe is allowed")
+    else: 
+        counts = tx_metadata.groupby(['cell_id', "gene"],
+                                     as_index=False)['molecule_id'].count()
+        counts = pd.pivot(counts, values='molecule_id', columns="gene", index='cell_id').fillna(0)
+        
+    counts.index.rename(name='cell_id', inplace=True)
     # Create AnnData object to store the counts 
     # and facilitate future processing 
     adata = sc.AnnData(counts)
@@ -316,8 +323,10 @@ def generate_count_patches(adata: sc.AnnData,
 def make_reassignment_adata(adata: sc.AnnData,
                             layer: str,
                             tx_to_reassign: pd.DataFrame,
-                            trial_layer: Optional[str]=None) -> sc.AnnData:
-    """Make the actual reassignment and adjustment 
+                            trial_layer: Optional[str]=None,
+                            preprocess: bool=True) -> sc.AnnData:
+    """Make the count adjustment on the adata alone 
+    This will not alter the tx information 
 
     Parameters
     ----------
@@ -342,50 +351,55 @@ def make_reassignment_adata(adata: sc.AnnData,
         
     # Update adata
     adata.layers[trial_layer] = adata.layers[layer]+counts_to_add-counts_to_subtract 
-    adata = process_adata(adata=adata, layer=trial_layer)
-    
+    if np.any(adata.layers[trial_layer]<0):
+        raise Exception("Negative values generated. This might be due inconsistency between the count matrix and the tx data.")
+    if preprocess:
+        adata = process_adata(adata=adata, layer=trial_layer)
     return adata
 
 
 def make_reassignment_tx_metadata(tx_to_reassign: pd.DataFrame,
                                   tx_metadata: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
-    """_summary_
+    """Make the count adjustment on the tx data alone 
 
     Parameters
     ----------
     tx_to_reassign : pd.DataFrame
-        _description_
+        Transcripts that should be reassigned
     tx_metadata : gpd.GeoDataFrame
-        _description_
+        The tx metadata 
 
     Returns
     -------
     gpd.GeoDataFrame
-        _description_
+        The adjusted tx metadata 
     """
+    # To perform tx reassign, we simply need to switch the cell_id with its corresponding neighbor_cell_id
+    # and update the original dataframe. We just need to make sure that the keys all match 
     tx_to_reassign.index = tx_to_reassign['molecule_id']
     tx_to_reassign.loc[:, ['cell_id', 'neighbor_cell_id']] = tx_to_reassign.loc[:, ['neighbor_cell_id', 'cell_id']]
-    # tx_metadata["cell_id_"+str(layer_num)] = tx_metadata['cell_id']
     tx_metadata.update(tx_to_reassign)
     return tx_metadata
 
 
 def reverse_reassignment_tx_metadata(tx_to_reassign: pd.DataFrame,
                                      tx_metadata: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
-    """_summary_
+    """Reverse the adjustment 
 
     Parameters
     ----------
     tx_to_reassign : pd.DataFrame
-        _description_
+        Transcripts that should be reassigned
     tx_metadata : gpd.GeoDataFrame
-        _description_
+        The tx metadata 
 
     Returns
     -------
     gpd.GeoDataFrame
-        _description_
+        This should be the original tx metadata 
     """
+    # To reverse the adjustment, simply update the new tx metadata 
+    # using the reassign dataframe. 
     tx_to_reassign.index = tx_to_reassign['molecule_id']
     tx_metadata.update(tx_to_reassign)
     return tx_metadata

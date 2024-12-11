@@ -21,7 +21,7 @@ from MisC.utility import import_data, calculate_mask_distance,\
 from MisC.generate_tx_feature import generate_feature
 from MisC.data_loader import generate_patch_coords, load_patch
 # Typing 
-from typing import Union, Optional 
+from typing import Union, Optional, Tuple 
 
 
 class misc(nn.Module):
@@ -41,7 +41,7 @@ class misc(nn.Module):
                 num_rep: int=3,
                 method: str="split",
                 reparametrize: bool=True) -> None:
-        """_summary_
+        """Instantiate a misc object 
 
         Parameters
         ----------
@@ -125,20 +125,16 @@ class misc(nn.Module):
         
         
     def import_data(self,
-                    cell_by_gene_counts: Union[str, pd.DataFrame],
                     cell_metadata: Union[str, pd.DataFrame],
                     cell_boundary_polygons: Union[str, gpd.GeoDataFrame],
-                    detected_transcripts: Union[str, pd.DataFrame, gpd.GeoDataFrame]) -> None:
+                    detected_transcripts: Union[str, pd.DataFrame, gpd.GeoDataFrame],
+                    cell_by_gene_counts: Optional[Union[str, pd.DataFrame]]=None) -> None:
         """Read in the four pieces information needed for subsequent analysis: 
         cell-by-gene counts, cell metadata, cell boundary information, and transcript information. Some 
         basic visualization and cell clustering will be performed. 
 
         Parameters
         ----------
-        cell_by_gene_counts : Union[str, pd.DataFrame]
-            Either the path to the csv file or a pandas dataframe containing the cell-by-gene count matrix whose first 
-            column is assumed to contain the ID for each cell while the rest of the columns should be the transcript counts
-            for each cell. 
         cell_metadata : Union[str, pd.DataFrame]
             Either the path to the csv file or a pandas dataframe containing the metadata for each cell whose 
             first column is assumed to contain the ID for each cell. The information in the file/object should 
@@ -153,12 +149,17 @@ class misc(nn.Module):
             Either the path to the csv file or a pandas dataframe containing the information of the detected transcripts.
             The first column is assumed to be some index. The information should contain the ID for a transcripte/molecule, 
             the ID of the cell it belongs to, its xy coordinate named global_x, global_y respectively, and its gene information. 
+        cell_by_gene_counts : Optional[Union[str, pd.DataFrame]]
+            Either the path to the csv file or a pandas dataframe containing the cell-by-gene count matrix whose first 
+            column is assumed to contain the ID for each cell while the rest of the columns should be the transcript counts
+            for each cell. 
+        
         """
         print("Importing data... This could take a while. But you already know what we are dealing with...")
-        self.adata, self.cell_coords, self.tx_metadata = import_data(cell_by_gene_counts=cell_by_gene_counts,
-                                                                      cell_metadata=cell_metadata,
+        self.adata, self.cell_coords, self.tx_metadata = import_data(cell_metadata=cell_metadata,
                                                                       cell_boundary_polygons=cell_boundary_polygons,
                                                                       detected_transcripts=detected_transcripts,
+                                                                      cell_by_gene_counts=cell_by_gene_counts,
                                                                       **self.import_data_par)
         print("Computing mask distances... Keep in mind, patience is a virtue...")
         self.mask_distance = calculate_mask_distance(adata=self.adata,
@@ -203,7 +204,7 @@ class misc(nn.Module):
     
     def encode(self, 
                tx_features: torch.tensor,
-               temperature: float):
+               temperature: float) -> Tuple[torch.tensor, torch.tensor]:
         reassign_logits = self.reassign_coefficients(tx_features) 
         reassign_probs = binary_gumbel_softmax_sample(logits=reassign_logits,
                                                         temperature=temperature,
@@ -215,7 +216,7 @@ class misc(nn.Module):
         
     def decode(self, 
                updated_cell_by_gene_counts: torch.tensor,
-               prior_distance_features: torch.tensor):
+               prior_distance_features: torch.tensor) -> Tuple[torch.tensor, torch.tensor]:
         cell_type_logits = self.cell_type_coefficients(updated_cell_by_gene_counts)
         prior_reassign_logits = self.prior_reassign_coefficients(prior_distance_features)
         prior_reassign_probs = torch.sigmoid(prior_reassign_logits)
@@ -228,7 +229,7 @@ class misc(nn.Module):
                 row_index_self: torch.tensor,
                 row_index_neighbor: torch.tensor,
                 col_index: torch.tensor,
-                temperature: float):
+                temperature: float) -> Tuple[torch.tensor, torch.tensor, torch.tensor]:
         
         reassign_hard, reassign_probs = self.encode(tx_features=tx_features,
                                                     temperature=temperature)
@@ -257,7 +258,7 @@ class misc(nn.Module):
                       cell_type_labels: torch.tensor,
                       reassign_probs: torch.tensor,
                       prior_reassign_probs: torch.tensor, 
-                      verbose: bool=False):
+                      verbose: bool=False) -> torch.tensor:
         # Cross entropy loss (despite its name it's a loss)
         CEl = F.cross_entropy(cell_type_logits,
                               cell_type_labels, reduction='mean') 
@@ -275,7 +276,7 @@ class misc(nn.Module):
     
     def training_loop(self,
                       n_epochs: int,
-                      verbose: bool=False):
+                      verbose: bool=False) -> None:
         self.train()
         for epoch in range(n_epochs):
             np.random.shuffle(self.coord_list)
@@ -348,7 +349,8 @@ class misc(nn.Module):
                 self.adata = make_reassignment_adata(adata=self.adata,
                                                      layer=self.current_layer,
                                                      tx_to_reassign=tx_to_reassign,
-                                                     trial_layer=trial_layer)
+                                                     trial_layer=trial_layer,
+                                                     preprocess=self.import_data_par['preprocess'])
     
     def final_reassign_tx(self,
                           selected_criterion: str) -> None:
@@ -356,7 +358,8 @@ class misc(nn.Module):
         tx_to_reassign = self.tx_to_reassign_dict[self.current_layer+"_"+selected_criterion].copy()
         self.adata = make_reassignment_adata(adata=self.adata, 
                                              layer=self.current_layer,
-                                             tx_to_reassign=tx_to_reassign)
+                                             tx_to_reassign=tx_to_reassign,
+                                             preprocess=self.import_data_par['preprocess'])
         self.tx_metadata = make_reassignment_tx_metadata(tx_to_reassign=tx_to_reassign,
                                                          tx_metadata=self.tx_metadata)
         layer_num = extract_layer_num(self.current_layer)

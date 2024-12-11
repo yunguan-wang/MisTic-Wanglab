@@ -393,7 +393,8 @@ if __name__ == "__main__":
             ].sum().sum())
     #%%
     print('Saving outputs.')
-    tx_meta_interface = tx_meta[tx_meta.cell.isin(interface_synthetic.index)].copy()
+    # tx_meta_interface = tx_meta[tx_meta.cell.isin(interface_synthetic.index)].copy()
+    tx_meta_interface = tx_meta.copy()
     tx_meta_interface['tx_type'] = 'real'
     tx_meta_interface['point'] = points_from_xy(tx_meta_interface.global_x,tx_meta_interface.global_y)
     tx_meta_interface.rename({'cell':'cell_id'}, inplace=True, axis=1)
@@ -403,10 +404,13 @@ if __name__ == "__main__":
     tx_meta_interface = pd.concat([tx_meta_interface, synthetic_tx_meta])
     tx_meta_interface = GeoDataFrame(tx_meta_interface, geometry='point')
     keep = ['gene', 'point', 'cell_id', 'tx_type', 'x', 'y','neighbor']
-    tx_meta_interface['x'] = tx_meta_interface.point.apply(lambda x: np.array(x.xy).flatten()[0])
-    tx_meta_interface['y'] = tx_meta_interface.point.apply(lambda x: np.array(x.xy).flatten()[1])
+    tx_meta_interface[['x', 'y']] = tx_meta_interface['point'].get_coordinates()
+    # tx_meta_interface['x'] = tx_meta_interface.point.apply(lambda x: np.array(x.xy).flatten()[0])
+    # tx_meta_interface['y'] = tx_meta_interface.point.apply(lambda x: np.array(x.xy).flatten()[1])
     tx_meta_interface = tx_meta_interface[keep]
-    tx_meta_interface.index = ['tx_s_' + str(i+1) for i in range(tx_meta_interface.shape[0])]
+    tx_meta_interface.reset_index(inplace=True, drop=True)
+    tx_meta_interface.index = "tx_" + tx_meta_interface.index.astype(str)
+    # tx_meta_interface.index = ['tx_s_' + str(i+1) for i in range(tx_meta_interface.shape[0])]
     synthetic_counts.to_csv(output_path + '/synthetic_counts_with_doublets.csv')
     tx_meta_interface.to_parquet(output_path + '/synthetic_counts_tx_metadata.parquet', index=True)
     cell_meta_synthetic.loc[synthetic_counts.index].to_csv(output_path + '/synthetic_counts_with_doublets_metadata.csv')

@@ -25,7 +25,7 @@ import sys
 import torch
 import argparse
 
-from MisC import __version__, __author__
+from MisC.__version__ import __version__, __author__
 from MisC.misc_class import misc
 
 parser = argparse.ArgumentParser(description="Misc")
