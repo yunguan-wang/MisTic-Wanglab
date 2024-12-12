@@ -1,0 +1,5 @@
+__title__ = "txMisC"
+__description__ = "An algorithm to reassign transcripts"
+__version__ = "0.0.1"
+__author__ = "misc developers"
+__authoremail__ = "@.edu; @.edu; @.edu"

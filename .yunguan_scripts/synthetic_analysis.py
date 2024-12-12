@@ -56,11 +56,17 @@ mask = (true_delta>0) | (pred_delta!=0)
 x_vec = true_delta[mask]
 y_vec = -pred_delta[mask]
 # %%
-sns.jointplot(
+# sns.jointplot(
+#     x=x_vec + np.random.uniform(0,0.1, len(x_vec)),
+#     y=y_vec + np.random.uniform(0,0.1, len(x_vec)),
+#     kind='kde')
+sns.scatterplot(
     x=x_vec + np.random.uniform(0,0.1, len(x_vec)),
     y=y_vec + np.random.uniform(0,0.1, len(x_vec)),
-    kind='kde')
+)
 plt.xlabel('Number of simulated Tx in cell')
 plt.ylabel('Predicted Tx in cell')
 
+# %%
+updated_counts = updated_counts[updated_counts>0].fillna(0)
 # %%
