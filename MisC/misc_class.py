@@ -554,7 +554,7 @@ class misc(nn.Module):
         temp_df = self.adata.obs[[new_leiden_name]].merge(self.adata.uns['cell_type_leiden_map'],
                                             how='left', left_on = new_leiden_name,
                                             right_on = "cell_type_index")
-        self.adata.obs[new_cell_type_name] = temp_df['cell_type_name'].copy()
+        self.adata.obs[new_cell_type_name] = temp_df['cell_type_name'].values.copy()
         
         self.adata.obs[new_leiden_name+"_perplexity"] = perplexity
         self.adata.obs['leiden'] = self.adata.obs[new_leiden_name].copy()
