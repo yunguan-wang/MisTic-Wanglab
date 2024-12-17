@@ -46,7 +46,7 @@ def expression_feature(adata: sc.AnnData,
     aug_sample = adata.to_df(layer).copy()
     aug_sample['leiden'] = adata.obs['leiden'].copy()
     aug_sample.reset_index(drop=False, names=['cell_id'],inplace=True)
-    for l in tqdm(adata.uns[layer+"_leiden"], desc="Augmenting sample"):
+    for l in tqdm(adata.uns["unique_leiden"], desc="Augmenting sample"):
         temp = adata.to_df(layer).loc[adata.obs['leiden']!=l, :].copy()
         temp['leiden'] = "cell_type_m_"+str(l)
         temp.reset_index(drop=False, names=['cell_id'],inplace=True)
@@ -101,8 +101,8 @@ def expression_feature(adata: sc.AnnData,
     dds.deseq2()
     print("Performing one-vs-one differential analysis...")
     exp_1v1_list = []
-    for neighbor_celltype, celltype in tqdm(combinations(adata.uns[layer+"_leiden"], 2), 
-                                            total=(adata.uns[layer+"_n_leiden"] * (adata.uns[layer+"_n_leiden"]-1))/2):
+    for neighbor_celltype, celltype in tqdm(combinations(adata.uns["unique_leiden"], 2), 
+                                            total=(adata.uns["n_leiden"] * (adata.uns["n_leiden"]-1))/2):
         # Since deseq2 will replace _ with -
         n_ct = neighbor_celltype.replace("_", "-")
         ct = celltype.replace("_", "-")
@@ -135,7 +135,7 @@ def expression_feature(adata: sc.AnnData,
     
     print("Performing one-vs-rest differential analysis...")
     exp_1vR_list = []
-    for celltype in tqdm(adata.uns[layer+"_leiden"]):
+    for celltype in tqdm(adata.uns["unique_leiden"]):
         # Since deseq2 will replace _ with -
         ct = celltype.replace("_", "-")
         stat_res = DeseqStats(dds, 

@@ -186,7 +186,7 @@ def load_patch(adata: sc.AnnData,
     tx_patch = tx_patch.merge(cell_patch[['row_index']], 
                how='left', left_on="neighbor_cell_id", right_index=True).rename(columns={"row_index": "row_index_neighbor"})
     
-    cell_type_labels = torch.tensor(cell_patch['leiden'].astype(int).values, dtype=torch.int64)
+    cell_type_labels = torch.tensor(cell_patch['leiden'].astype(int).values, dtype=torch.int64, device=model_device)
     # cell_type_labels = torch.tensor(cell_patch['leiden'].astype(int).values, dtype=torch.int64).unsqueeze(1)
     # cell_type_labels = torch.zeros(cell_patch.shape[0], 40, dtype=torch.float32).scatter(0, cell_type_labels, 1).to(model_device)
     # Drop irrelevant columns and convert dataframes to tensors 
@@ -198,9 +198,9 @@ def load_patch(adata: sc.AnnData,
                                dtype=torch.float32, device=model_device)
     tx_prior_features = torch.tensor(tx_patch[['prior_distance_feature']].values,
                                      dtype=torch.float32, device=model_device)
-    row_index_self = torch.LongTensor(tx_patch[['row_index_self']].values, device=model_device)
-    row_index_neighbor = torch.LongTensor(tx_patch[['row_index_neighbor']].values, device=model_device)
-    col_index = torch.LongTensor(tx_patch[['col_index']].values, device=model_device)
+    row_index_self = torch.tensor(tx_patch[['row_index_self']].values, dtype=torch.int64, device=model_device)
+    row_index_neighbor = torch.tensor(tx_patch[['row_index_neighbor']].values, dtype=torch.int64, device=model_device)
+    col_index = torch.tensor(tx_patch[['col_index']].values, dtype=torch.int64, device=model_device)
     
     return cell_by_gene_counts, tx_features, tx_prior_features, cell_type_labels, row_index_self, row_index_neighbor, col_index
     

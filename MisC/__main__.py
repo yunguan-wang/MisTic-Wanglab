@@ -40,34 +40,54 @@ parser.add_argument("--cell_centroid_x_y_col", nargs=2, type=str, default=['cent
                     help="The column containing the x and y coordinates of cell centroids in cell metadata file")
 parser.add_argument("--tx_x_y_col", nargs=2, type=str, default=["global_x", "global_y"], 
                     help="The column containing the x and y coordinates of transcript in detected transcript file")
-parser.add_argument("--gene_col", type=str, default="gene")
-parser.add_argument("--cell_col", type=str, default="cell_id")
-parser.add_argument("--celltype_col", nargs='?', type=str)
-parser.add_argument("--leiden_res", type=float, default=1)
-parser.add_argument("--no_preprocess", action="store_true")
-parser.add_argument("--max_centroid_dist", type=float, default=50)
-parser.add_argument("--min_centroid_dist", type=float, default=0)
-parser.add_argument("--mask_dist_cutoff", type=float, default=1)
-parser.add_argument("--num_rep", type=int, default=3)
-parser.add_argument("--method", type=str, default="split")
-parser.add_argument("--reparametrize", action="store_true")
+parser.add_argument("--gene_col", type=str, default="gene",
+                    help="The column containing the gene of transcript in detected transcript file")
+parser.add_argument("--cell_col", type=str, default="cell_id",
+                    help="The column containing the cell id of transcript in detected transcript file")
+parser.add_argument("--celltype_col", nargs='?', type=str,
+                    help="The column containing the cell type information in cell metadata file")
+parser.add_argument("--leiden_res", type=float, default=1,
+                    help="The resolution for leiden clustering")
+parser.add_argument("--no_preprocess", action="store_true",
+                    help="If specified, no data processing including UMAP will be computed")
+parser.add_argument("--max_centroid_dist", type=float, default=50,
+                    help="When computing mask distances, if a centroid distance is greater than this value, the mask distance will not be computed.")
+parser.add_argument("--min_centroid_dist", type=float, default=0,
+                    help="When computing mask distances, if a centroid distance is lower than this value, the mask distance will not be computed.")
+parser.add_argument("--mask_dist_cutoff", type=float, default=1,
+                    help="The threshold of cell-cell mask distances beyond which a cell is no longer considered a neighbor")
+parser.add_argument("--num_rep", type=int, default=3,
+                    help="Number of repetitions in case of method='bootstrap' or number of chuns in case of method='split'")
+parser.add_argument("--method", type=str, default="split",
+                    help="The method to generate pseudo bulks")
+parser.add_argument("--reparametrize", action="store_true",
+                    help="Whether or not to force positivity on coefficients")
 
 # Import data 
-parser.add_argument("--cell_metadata", type=str, required=True)
-parser.add_argument("--cell_boundary_polygons", type=str, required=True)
-parser.add_argument("--detected_transcripts", type=str, required=True)
-parser.add_argument("--cell_by_gene_counts", type=str)
+parser.add_argument("--cell_metadata", type=str, required=True,
+                    help="The path to the csv file that contains the coordinates of the centroids of cells")
+parser.add_argument("--cell_boundary_polygons", type=str, required=True,
+                    help="The path to the parquet file that contains the coordinates of the vertices of polygons of cells")
+parser.add_argument("--detected_transcripts", type=str, required=True,
+                    help="The path to the csv/parquet file that contains the coordinates, genes, and cell assignment of detected transcripts")
+parser.add_argument("--cell_by_gene_counts", type=str,
+                    help="The path to the csv file that contains the cell by gene count. If not provided, this will be inferred from the detected transcript file.")
 
 # Model training 
-parser.add_argument("--prior_50_reassign_prob", type=float, default=0.01)
-parser.add_argument("--prior_5_reassign_prob", type=float, default=0.5)
-parser.add_argument("--n_epochs", type=int, default=1)
+parser.add_argument("--prior_50_reassign_prob", type=float, default=0.01,
+                    help="The prior probability of reassigning a transcript that's ranked 50% based on the distance")
+parser.add_argument("--prior_5_reassign_prob", type=float, default=0.5,
+                    help="The prior probability of reassigning a transcript that's ranked 5% based on the distance")
+parser.add_argument("--n_epochs", type=int, default=1,
+                    help="Number of epochs")
 
 # reassign tx 
-parser.add_argument("--criteria", type=float, default=0.5)
+parser.add_argument("--criteria", type=float, default=0.5,
+                    help="Threshold on reassigning the transcript")
 
 # Model saving 
-parser.add_argument("--path", type=str, default="./misc.pt")
+parser.add_argument("--path", type=str, default="./misc.pt",
+                    help="The path at which the saved model should be. It should end with .pt")
 
 # Maybe consider
 # config.yaml
@@ -127,20 +147,21 @@ def main(cmdargs: argparse.Namespace):
     prior_50_reassign_prob = cmdargs.prior_50_reassign_prob
     prior_5_reassign_prob = cmdargs.prior_5_reassign_prob
     
-    m.initiate_parameters(prior_50_reassign_prob=prior_50_reassign_prob,
-                          prior_5_reassign_prob=prior_5_reassign_prob)
+    m.initialize_parameters(prior_50_reassign_prob=prior_50_reassign_prob,
+                            prior_5_reassign_prob=prior_5_reassign_prob)
     
     n_epochs = cmdargs.n_epochs
     
     m.training_loop(n_epochs=n_epochs,
                     verbose=False)
     
-    criteria = {"soft": cmdargs.criteria}
+    criteria = {"threshold": cmdargs.criteria}
     m.trial_reassign_tx(criteria=criteria)
-    m.final_reassign_tx(selected_criterion="soft")
+    m.final_reassign_tx(selected_criterion="threshold")
     
-    # reclustering 
-    
+    # reclustering
+    # In cli, only argmax will be used 
+    m.recluster() 
     
     # saving model 
     m.save_model(path=cmdargs.path)
