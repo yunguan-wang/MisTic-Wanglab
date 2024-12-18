@@ -36,6 +36,8 @@ def process_adata(adata: sc.AnnData,
     # Make sure X is the counts 
     # Then for all subsequent processing, we can just proceed with the default 
     adata.X = adata.layers[layer].copy()
+    if "log1p" in adata.uns:
+        del adata.uns['log1p']
     sc.pp.normalize_total(adata, target_sum=1000)
     sc.pp.log1p(adata)
     # We also perform basic visualization 
@@ -186,14 +188,21 @@ def import_data(cell_metadata: Union[str, pd.DataFrame],
         print("Performing Leiden clustering.")
         sc.tl.leiden(adata, resolution=leiden_res, key_added='cell_type')
         adata.obs['leiden'] = adata.obs['cell_type'].astype(str)
+    # leiden always stores the latest version 
+    adata.obs['counts_0_leiden'] = adata.obs['leiden'].copy()
     # Record some meta information 
-    adata.uns['counts_0_leiden'] = np.unique(adata.obs['leiden'])
-    adata.uns['counts_0_n_leiden'] = len(adata.uns['counts_0_leiden'])
+    adata.uns['unique_leiden'] = np.unique(adata.obs['counts_0_leiden'])
+    adata.uns['n_leiden'] = len(adata.uns['unique_leiden'])
+    adata.uns['cell_type_leiden_map'] = adata.obs[["cell_type", "leiden"]].drop_duplicates(ignore_index=True)
+    adata.uns['cell_type_leiden_map'].rename(columns={"cell_type": "cell_type_name",
+                                                      "leiden": "cell_type_index"},
+                                             inplace=True)
     adata.uns['centroid_x_min'] = adata.obs['x'].min()
     adata.uns['centroid_x_max'] = adata.obs['x'].max()
     adata.uns['centroid_y_min'] = adata.obs['y'].min()
     adata.uns['centroid_y_max'] = adata.obs['y'].max()
     adata.uns['n_genes'] = adata.var.shape[0]
+    adata.uns['current_layer'] = "counts_0"
     
     print("Done~")
     print("="*30)
