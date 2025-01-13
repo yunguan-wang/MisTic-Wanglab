@@ -5,12 +5,29 @@
 
 ## Installation 
 
-Installing a software package is like ordering a pizza online…
-Except instead of pizza, you get 37 follow-up questions, 12 optional toppings you didn’t ask for, and a message saying: Installation failed. Try again later.
+This is only for internal usage. We will publish the package on pypi later on. But for now, we will just build the package locally. 
 
-```shell
-pip install MisC
+1. Clone the repo to a local directory, say `./awesome_repos` and `cd` to that folder. 
+
+2. Now, you should have a `MisC` folder under the `awesome_repos` directory. 
+```shell 
+cd ./MisC
 ```
+
+3. Build the package 
+```shell
+python setup.py sdist bdist_wheel
+```
+You should see a `dist` folder now which contains the wheel file you will need for installing the package. 
+
+4. To install the package
+```shell
+conda create -n misc python=3.9
+conda activate misc 
+cd ./dist
+pip install ./txMisC-0.0.1-py3-none-any.whl
+```
+
 
 ### Dependencies 
 
@@ -20,6 +37,29 @@ pip install MisC
 ## Examples 
 
 ### Interactive Python 
+This assumes that you are using Jupyter notebook to run MisC
+
+```python
+>>> from MisC.misc_class import misc
+>>> # Check and specify the column names!
+>>> m = misc("MAKE/SURE/TO/CHECK/COLUMN/NAMES!!!")
+>>> # cell_by_gene_counts is optional
+>>> cell_by_gene_counts = "PATH/TO/COUNTS"
+>>> detected_transcripts = 'PATH/TO/TX'
+>>> cell_metadata = 'PATH/TO/META'
+>>> cell_boundary_polygons = "PATH/TO/POLYGONS"
+>>> m.import_data(cell_by_gene_counts=cell_by_gene_counts,
+                    cell_metadata=cell_metadata,
+                    cell_boundary_polygons=cell_boundary_polygons,
+                    detected_transcripts=detected_transcripts)
+>>> m.patchfy_data()
+>>> m.initialize_parameters()
+>>> m.training_loop(1)
+>>> m.trial_reassign_tx(criteria={"threshold": 0.5})
+>>> m.final_reassign_tx(selected_criterion="threshold")
+>>> m.recluster()
+```
+
 
 ### Command-Line Interface (CLI)
 
