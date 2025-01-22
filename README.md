@@ -27,7 +27,11 @@ conda activate misc
 cd ./dist
 pip install ./txMisC-0.0.1-py3-none-any.whl
 ```
-
+5. Alternatively, you can use conda/micromamba to install all dependencies. Then use pip to just install MisC with `no-deps` option.
+```shell
+micromamba install python=3.10 pytorch=1.13 geopandas notebook ipykernel tqdm ipywidgets pyarrow scanpy pydeseq2
+pip install --no-deps .
+```
 
 ### Dependencies 
 
