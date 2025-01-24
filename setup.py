@@ -1,5 +1,6 @@
 from setuptools import setup 
 import re 
+import os 
 
 
 VERSIONFILE="MisC/__version__.py"
@@ -42,6 +43,14 @@ else:
     raise RuntimeError("Unable to find author email string in %s." % (VERSIONFILE,))
 
 
+lib_folder = os.path.dirname(os.path.realpath(__file__))
+requirement_path = f"{lib_folder}/requirements.txt"
+install_requires = [] 
+if os.path.isfile(requirement_path):
+    with open(requirement_path) as f:
+        install_requires = f.read().splitlines()
+
+
 setup(
     name=TITLE,
     version=VERSION,
@@ -52,23 +61,7 @@ setup(
     long_description=open("README.md").read(),
     packages=["MisC"],
     python_requires=">=3.9,<3.11",
-    install_requires=[
-        'adjustText==1.2.0',
-        'h5py==3.11.0',
-        'matplotlib==3.9.1',
-        'numpy==1.26.4',
-        'pandas==2.2.2',
-        'pydeseq2==0.4.12',
-        'scanpy==1.10.2',
-        'scikit-learn==1.5.1',
-        'scipy==1.13.1',
-        'seaborn==0.13.2',
-        'shapely==2.0.4',
-        'squidpy==1.5.0',
-        'tables==3.9.2',
-        'torch==1.13.0',
-        'tqdm==4.66.4',
-    ],
+    install_requires=install_requires,
     test_requires=[
         'pytest==7.1.2',
         'coverage==6.3.2',
