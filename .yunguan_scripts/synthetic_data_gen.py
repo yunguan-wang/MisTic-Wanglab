@@ -393,7 +393,7 @@ if __name__ == "__main__":
             ].sum().sum())
     #%%
     print('Saving outputs.')
-    # tx_meta_interface = tx_meta[tx_meta.cell.isin(interface_synthetic.index)].copy()
+    tx_meta_interface = tx_meta[tx_meta.cell.isin(interface_synthetic.index)].copy()
     tx_meta_interface = tx_meta.copy()
     tx_meta_interface['tx_type'] = 'real'
     tx_meta_interface['point'] = points_from_xy(tx_meta_interface.global_x,tx_meta_interface.global_y)

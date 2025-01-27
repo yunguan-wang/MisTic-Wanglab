@@ -541,6 +541,10 @@ class misc(nn.Module):
         # perplexity is also computed to see how uncertain the model is 
         perplexity = np.exp(entropy(probs, axis=1, keepdims=True))
         # To allow the user to recluster multiple times 
+        # by running the recluster method multiple times 
+        # The first time the user runs recluster, the index will be 0
+        # after that every time the user runs recluster, the index will 
+        # increment by 1
         i=0
         while True:
             new_leiden_name = new_layer + "_leiden_" + str(i)
@@ -612,7 +616,7 @@ class misc(nn.Module):
         self.adata.obs.rename_geometry("cell_centroid_geom", inplace=True)
         self.current_layer = self.adata.uns['current_layer']
         
-        self.initiate_parameters()
+        self.initialize_parameters()
         checkpoint = torch.load(path) 
         self.load_state_dict(checkpoint['model_state_dict'])
         self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
