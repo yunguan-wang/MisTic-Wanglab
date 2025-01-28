@@ -203,15 +203,26 @@ def distance_feature(adata: sc.AnnData,
     # we find cells (interface cells) that are close to their neighbors (identified via cell centroids)
     # Note that in computing the mask distance, we only included pairs 
     # of cells that of different types 
-    interface = mask_distance[mask_distance.mask_distance<=mask_dist_cutoff]
+    print("Extracting transcripts in the interface")
+    print("1")
+    interface = mask_distance.loc[mask_distance.mask_distance<=mask_dist_cutoff, ['cell_id', 'neighbor_cell_id']]
+    interface = interface.merge(adata.obs[["leiden"]], how='left',
+                    left_on='cell_id', right_index=True).rename(columns={"leiden": "cell_type"},
+                                                                    inplace=False)
+    interface = interface.merge(adata.obs[["leiden"]], how='left',
+                            left_on='neighbor_cell_id', right_index=True).rename(columns={"leiden": "neighbor_celltype"},
+                                                                    inplace=False)
+    print("2")
     valid_cells = interface["cell_id"].unique()
     # We extract transcripts of those interface cells 
+    print("3")
     intf_tx = tx_metadata[tx_metadata["cell_id"].isin(valid_cells)]
     # Then we compute the distance between transcript and cell mask of neighboring cell
     print("Computing distances among transcripts and neighboring cells...")
-    intf_tx = intf_tx.merge(
-        interface[["cell_id", 'neighbor_cell_id','mask_distance']], on="cell_id", how='left')
-    intf_tx['self_mask_geom'] = cell_coords.loc[intf_tx.cell_id.values, "cell_boundary_geom"].values
+    # intf_tx = intf_tx.merge(
+    #     interface[["cell_id", 'neighbor_cell_id','mask_distance']], on="cell_id", how='left')
+    intf_tx = intf_tx.merge(interface, on="cell_id", how='left')
+    # intf_tx['self_mask_geom'] = cell_coords.loc[intf_tx.cell_id.values, "cell_boundary_geom"].values
     intf_tx['neighbor_mask_geom'] = cell_coords.loc[intf_tx.neighbor_cell_id.values, "cell_boundary_geom"].values
     intf_tx['neighbor_mask_distance'] = distance(intf_tx["tx_geom"], intf_tx['neighbor_mask_geom'])
     # Get the overall min distance 
@@ -219,25 +230,25 @@ def distance_feature(adata: sc.AnnData,
     min_mask_distance.rename(columns={"neighbor_mask_distance": "min_neighbor_mask_distance"}, inplace=True)
     intf_tx = intf_tx.merge(min_mask_distance, how='left', on="molecule_id")
     
-    intf_tx = intf_tx.merge(adata.obs[["leiden","cell_centroid_geom"]], how='left',
-                            left_on='cell_id', right_index=True).rename(columns={"leiden": "cell_type",
-                                                                                "cell_centroid_geom": "self_centroid_geom"},
-                                                                    inplace=False)
-    intf_tx = intf_tx.merge(adata.obs[["leiden","cell_centroid_geom"]], how='left',
-                            left_on='neighbor_cell_id', right_index=True).rename(columns={"leiden": "neighbor_celltype",
-                                                                                         "cell_centroid_geom": "neighbor_centroid_geom"},
-                                                                    inplace=False)
+    # intf_tx = intf_tx.merge(adata.obs[["leiden","cell_centroid_geom"]], how='left',
+    #                         left_on='cell_id', right_index=True).rename(columns={"leiden": "cell_type",
+    #                                                                             "cell_centroid_geom": "self_centroid_geom"},
+    #                                                                 inplace=False)
+    # intf_tx = intf_tx.merge(adata.obs[["leiden","cell_centroid_geom"]], how='left',
+    #                         left_on='neighbor_cell_id', right_index=True).rename(columns={"leiden": "neighbor_celltype",
+    #                                                                                      "cell_centroid_geom": "neighbor_centroid_geom"},
+    #                                                                 inplace=False)
     intf_tx = intf_tx[intf_tx['cell_type']!=intf_tx['neighbor_celltype']]
     # Get the nearest neighbor 
     intf_tx.sort_values('neighbor_mask_distance', inplace=True)
     intf_tx = intf_tx.groupby(['molecule_id'], as_index=False).nth(0).reset_index(drop=True)
-    intf_tx['self_mask_distance'] = distance(intf_tx["tx_geom"], intf_tx['self_mask_geom'].boundary)
+    # intf_tx['self_mask_distance'] = distance(intf_tx["tx_geom"], intf_tx['self_mask_geom'].boundary)
     
-    intf_tx['self_centroid_distance'] = distance(intf_tx['tx_geom'], intf_tx['self_centroid_geom'])
-    intf_tx['neighbor_centroid_distance'] = distance(intf_tx['tx_geom'], intf_tx['neighbor_centroid_geom'])
+    # intf_tx['self_centroid_distance'] = distance(intf_tx['tx_geom'], intf_tx['self_centroid_geom'])
+    # intf_tx['neighbor_centroid_distance'] = distance(intf_tx['tx_geom'], intf_tx['neighbor_centroid_geom'])
     
     intf_tx['neighbor_mask_distance_rank'] = intf_tx.groupby(['cell_id'])['neighbor_mask_distance'].rank(pct=True) * 0.999
-    intf_tx['self_mask_distance_rank'] = intf_tx.groupby(['cell_id'])['self_mask_distance'].rank(pct=True) * 0.999
+    # intf_tx['self_mask_distance_rank'] = intf_tx.groupby(['cell_id'])['self_mask_distance'].rank(pct=True) * 0.999
     intf_tx['min_neighbor_mask_distance_rank'] = intf_tx.groupby(['cell_id'])['min_neighbor_mask_distance'].rank(pct=True) * 0.999
     # Compute distance feature
     intf_tx['distance_feature'] = -np.log(intf_tx['neighbor_mask_distance_rank']/(1-intf_tx['neighbor_mask_distance_rank']))

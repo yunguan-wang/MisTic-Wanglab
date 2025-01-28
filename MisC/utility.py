@@ -13,8 +13,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 from shapely import distance
 from scipy.spatial.distance import cdist
-# Typing 
+from scipy.spatial import KDTree
+# Typing and other info
 from typing import Optional, Union, Tuple
+from time import time
 
 
 def process_adata(adata: sc.AnnData,
@@ -99,6 +101,8 @@ def import_data(cell_metadata: Union[str, pd.DataFrame],
     """
 
     # Cell metadata
+    print("Processing cell metadata")
+    start_time = time()
     if isinstance(cell_metadata, str) and ("csv" in os.path.splitext(cell_metadata)[1]):
         cell_meta = pd.read_csv(cell_metadata, index_col=0)
     elif isinstance(cell_metadata, pd.DataFrame):
@@ -108,7 +112,11 @@ def import_data(cell_metadata: Union[str, pd.DataFrame],
     cell_meta.index.rename(name='cell_id', inplace=True)
     cell_meta.rename(columns={cell_centroid_x_col: "center_x",
                               cell_centroid_y_col: "center_y"}, inplace=True, errors='raise')
+    end_time = time()
+    print("Done. Time taken is {}".format(end_time-start_time))
     # Polygons of cells 
+    print("Processing cell boundaries")
+    start_time = time()
     if isinstance(cell_boundary_polygons, str) and ("parquet" in os.path.splitext(cell_boundary_polygons)[1]):
         cell_coords = read_parquet(cell_boundary_polygons)
     elif isinstance(cell_boundary_polygons, gpd.GeoDataFrame):
@@ -120,7 +128,11 @@ def import_data(cell_metadata: Union[str, pd.DataFrame],
         cell_coords.rename_geometry("cell_boundary_geom", inplace=True)
     # Remove potential duplicated vertices in a polygon
     cell_coords['cell_boundary_geom'] = cell_coords['cell_boundary_geom'].remove_repeated_points(tolerance=0.0)
+    end_time = time()
+    print("Done. Time taken is {}".format(end_time-start_time))
     # Transcript information 
+    print("Processing Transcript information ")
+    start_time = time()
     # We also convert the pandas dataframe to geopandas geodataframe 
     # by constructing points from the locations of each transcript
     if isinstance(detected_transcripts, str) and ("parquet" in os.path.splitext(detected_transcripts)[1]):
@@ -146,7 +158,11 @@ def import_data(cell_metadata: Union[str, pd.DataFrame],
             gene_col: 'gene',
             cell_col: 'cell_id'
             }, inplace=True, errors='raise')
+    end_time = time()
+    print("Done. Time taken is {}".format(end_time-start_time))
     # Cell by gene counts matrix 
+    print("Processing cell by gene matrix")
+    start_time = time()
     if cell_by_gene_counts is not None:
         if isinstance(cell_by_gene_counts, str) and ("csv" in os.path.splitext(cell_by_gene_counts)[1]):
             counts = pd.read_csv(cell_by_gene_counts, index_col=0)
@@ -160,8 +176,12 @@ def import_data(cell_metadata: Union[str, pd.DataFrame],
         counts = pd.pivot(counts, values='molecule_id', columns="gene", index='cell_id').fillna(0)
         
     counts.index.rename(name='cell_id', inplace=True)
+    end_time = time()
+    print("Done. Time taken is {}".format(end_time-start_time))
     # Create AnnData object to store the counts 
     # and facilitate future processing 
+    print("Creating AnnData object")
+    start_time = time()
     adata = sc.AnnData(counts)
     adata.obs['x'] = cell_meta.loc[adata.obs_names, "center_x"]
     adata.obs['y'] = cell_meta.loc[adata.obs_names, "center_y"]
@@ -173,6 +193,8 @@ def import_data(cell_metadata: Union[str, pd.DataFrame],
     # original count in one of the layers 
     adata.layers['counts_0'] = adata.X.copy()
     adata.raw = adata.copy()
+    end_time = time()
+    print("Done. Time taken is {}".format(end_time-start_time))
     if preprocess:
         # Then we perform basic normalization and transformation 
         print("="*30)
@@ -233,20 +255,38 @@ def calculate_mask_distance(adata: sc.AnnData,
         A dataframe where each row is a pair of neighboring cells as well as their distance information 
     """
     
-    # First, we compute cell-cell distance matrix based on their recorded centroids 
-    centroid_dist = cdist(adata.obs[['x','y']],adata.obs[['x','y']])
-    centroid_dist = pd.DataFrame(centroid_dist, index = adata.obs_names, columns=adata.obs_names)
-    # As computing mask distances between all pairs of cells would take too long
-    # we use the centroid distance to filter out the majority of the cells 
-    # We then create the adjacency matrix: 
-    # Any cell that is within in the specified threshold: max_centroid_dist is considered a neighbor
-    adj = (centroid_dist > min_centroid_dist) & (centroid_dist<= max_centroid_dist)
-    # For each cell, we record its neighbors as a list
-    adj = adj.agg(lambda x: adj.columns[x.values].tolist(), axis=1)
-    adj = pd.DataFrame(adj, columns = ['n'])
-    adj = adj[adj['n'].apply(len)>0]
+    # # First, we compute cell-cell distance matrix based on their recorded centroids 
+    # centroid_dist = cdist(adata.obs[['x','y']],adata.obs[['x','y']])
+    # centroid_dist = pd.DataFrame(centroid_dist, index = adata.obs_names, columns=adata.obs_names)
+    # # As computing mask distances between all pairs of cells would take too long
+    # # we use the centroid distance to filter out the majority of the cells 
+    # # We then create the adjacency matrix: 
+    # # Any cell that is within in the specified threshold: max_centroid_dist is considered a neighbor
+    # adj = (centroid_dist > min_centroid_dist) & (centroid_dist<= max_centroid_dist)
+    # # For each cell, we record its neighbors as a list
+    # adj = adj.agg(lambda x: adj.columns[x.values].tolist(), axis=1)
+    # adj = pd.DataFrame(adj, columns = ['n'])
+    # adj = adj[adj['n'].apply(len)>0]
+    
+    
+    
+    print("Compute cell-cell distance matrix based on their recorded centroids")
+    start_time = time()
+    centroid_dist_tree = KDTree(adata.obs[['x','y']])
+    # The distance is sorted 
+    _, adj_ind = centroid_dist_tree.query(adata.obs[['x','y']], k=10, 
+                                          distance_upper_bound=max_centroid_dist, workers=-1)
+    adj = pd.DataFrame(adj_ind, index=adata.obs_names).melt(ignore_index=False).drop(columns=['variable'])
+    adj = adj[adj['value']<adata.obs.shape[0]]
+    adj.loc[:,'n'] = adata.obs_names[adj['value']]
+    adj_masks_ids = adj[adj.index != adj.loc[:, "n"]].drop(columns=['value'])
+    end_time = time()
+    print("Done. Time taken is {}".format(end_time-start_time))
+    
     # Then we compute the cell-cell distance based on their masks
-    adj_masks_ids = adj.explode(column=['n'])
+    # adj_masks_ids = adj.explode(column=['n'])
+    print("Compute cell-cell distance matrix based on their masks")
+    start_time = time()
     md = distance(
         cell_coords.loc[adj_masks_ids.index, "cell_boundary_geom"].values,
         cell_coords.loc[adj_masks_ids['n'].values, "cell_boundary_geom"].values
@@ -256,6 +296,8 @@ def calculate_mask_distance(adata: sc.AnnData,
     mask_distance.reset_index(inplace=True, drop=False)
     mask_distance = mask_distance.merge(adata.obs[['x', 'y', 'cell_centroid_geom']], how='left', 
                                         left_on='cell_id', right_index=True).set_geometry("cell_centroid_geom")
+    end_time = time()
+    print("Done. Time taken is {}".format(end_time-start_time))
     return mask_distance
 
 

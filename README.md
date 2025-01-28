@@ -35,8 +35,23 @@ pip install --no-deps .
 
 ### Dependencies 
 
-- numpy 
-- scipy
+So far, we have only tested the package on python `3.9` and `3.10` with pytorch < `2.0`. 
+
+Note that if you install pytorch >= `2.0`, it will throw an error. 
+
+Also make sure the numpy version is < `2.0` and pydeseq2 is >=`0.4.6` and <`0.5`. 
+
+- python>=3.9,<3.11
+- torch==1.13
+- shapely==2.0
+- geopandas==1.0
+- pydeseq2>=0.4.6,<0.5
+- scanpy==1.10
+- numpy>=1.24,<2.0
+- anndata>=0.10,<0.11
+- pyarrow==16.1
+- jupyter
+- ipywidgets
 
 ## Examples 
 
