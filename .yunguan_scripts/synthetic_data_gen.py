@@ -12,6 +12,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import argparse
 import adjustText
+from tqdm import tqdm
 # %matplotlib inline
 #%%
 def plot_patch(
@@ -179,6 +180,23 @@ def synthetic_gex_gen():
     # Pick the non-tumor cells as replacements
     non_tumor_samples = adata_uq[
         adata_uq.obs.cell_type!='Tumor_cells'].to_df().sample(len(interface_tumor)).index
+    
+    tx_interface = tx_meta[tx_meta.cell.isin(interface_tumor)].copy()
+    # tx_interface_nt = tx_meta[tx_meta.cell.isin(non_tumor_samples)].copy().set_index('cell')
+    tx_interface['permuted_cell'] = pd.Series(
+        non_tumor_samples, index=interface_tumor)[tx_interface.cell].values
+    tx_interface['permuted_celltype'] = cell_meta.loc[
+        tx_interface['permuted_cell'],'cell_type'].values
+    
+    permuted_tx_interface = []
+    print('Replace interface tumor cell TXs with non Tumor TXs')
+    for _,df in tqdm(tx_interface.groupby('permuted_celltype')):
+        tx_ref = tx_meta[tx_meta.cell.isin(df.permuted_cell.unique())]
+        permuted_genes = tx_ref.gene.sample(df.shape[0], replace=True).values
+        df['permuted_gene'] = permuted_genes
+        permuted_tx_interface.append(df)
+    permuted_tx_interface = pd.concat(permuted_tx_interface)
+
     sample_celltypes = adata_uq.obs.loc[non_tumor_samples,'cell_type'].astype(str).values
     # Constract the interface adata with swapped cells
     # The interace cells will have the same cell id but swapped gene expression.
@@ -215,7 +233,7 @@ def synthetic_gex_gen():
         y_col='Y',
         cluster_col = 'cell_type',
         geometry_col='polygon')
-    return cell_dist_synthetic, cell_meta_synthetic, mask_distance_synthetic, adata_synthetic
+    return cell_dist_synthetic, cell_meta_synthetic, mask_distance_synthetic, adata_synthetic, permuted_tx_interface
 # %%
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
@@ -225,7 +243,7 @@ if __name__ == "__main__":
 
     parser.add_argument(
         "--input_path",
-        default = '/data/wanglab/project/doublet_detection/merscope_hcc1',
+        default = '/data/wanglab/project/doublet_detection/data/merscope_hcc1',
         help = "Path for all input files, including cell type, cell by gene counts, transcript metadata and \
             cell masks")
 
@@ -282,9 +300,17 @@ if __name__ == "__main__":
         action='store_true',
         help="Toggle for diagnosis plots on synthetic tx.",
     )
+    parser.add_argument(
+        "--full_TX",
+        "-f",
+        default=False,
+        action='store_true',
+        help="Toggle for storing the full tx metadata table",
+    )
 
     np.random.seed(2)
     args = parser.parse_args()
+    # args = parser.parse_args([])
     input_path = args.input_path
     max_noise_tx = args.max_per_cell_tx
     tx2m_dist = args.tx_max_dist_to_membrane
@@ -293,6 +319,7 @@ if __name__ == "__main__":
     pdiff = args.pct_diff
     diag = args.diagnosis_plot
     output_path = os.path.abspath('.')
+    save_full_TX_meta = args.full_TX
     doublet_prob = 1 - args.doublet_prob
     os.chdir(input_path)
     if not os.path.exists('cell_polygons.parquet'):
@@ -305,7 +332,7 @@ if __name__ == "__main__":
 # %%
     # Simulate TX that are close to cell boundary.
     print('Replacing tumor cells at the interface with non tumor cells.')
-    cell_dist_synthetic, cell_meta_synthetic, mask_distance_synthetic, adata_synthetic = synthetic_gex_gen()
+    cell_dist_synthetic, cell_meta_synthetic, mask_distance_synthetic, adata_synthetic,permuted_tx_interface = synthetic_gex_gen()
     interface_synthetic = mask_distance_synthetic[mask_distance_synthetic.mask_distance<0.5].copy()
     interface_synthetic['tumor_cell'] = interface_synthetic.index
     interface_synthetic = interface_synthetic.sort_values('mask_distance')
@@ -369,6 +396,8 @@ if __name__ == "__main__":
     synthetic_txs['cell'] = synthetic_txs.index
     synthetic_txs['num'] = 1
     synthetic_txs['nearest_neighbor'] = neighbors
+    synthetic_txs['x'] = synthetic_txs['synthetic_tx'].apply(lambda x: x.x)
+    synthetic_txs['y'] = synthetic_txs['synthetic_tx'].apply(lambda x: x.y)
     count_delta = synthetic_txs.groupby(['cell','gene']).num.count()
     count_delta = count_delta.reset_index().pivot(
         columns='gene', values='num', index='cell').fillna(0).astype(int)
@@ -393,28 +422,51 @@ if __name__ == "__main__":
             ].sum().sum())
     #%%
     print('Saving outputs.')
-    tx_meta_interface = tx_meta[tx_meta.cell.isin(interface_synthetic.index)].copy()
-    tx_meta_interface = tx_meta.copy()
+    tx_meta_interface = tx_meta[tx_meta.cell.isin(adata_synthetic.obs_names)].copy()
+    tx_meta_interface = tx_meta_interface.rename(
+        columns={'global_x':'x', 'global_y':'y'})
+    permuted_tx_interface = permuted_tx_interface.rename(
+        columns={'global_x':'x', 'global_y':'y'})
+    # Merge TX with permuted TX
+    tx_meta_interface = tx_meta_interface[
+        ~tx_meta_interface.cell.isin(permuted_tx_interface.cell.unique())]
+    permuted_tx_interface['gene'] = permuted_tx_interface['permuted_gene']
+    tx_meta_interface = pd.concat(
+        [tx_meta_interface, permuted_tx_interface])
+    # Merge with synthetic TX
     tx_meta_interface['tx_type'] = 'real'
-    tx_meta_interface['point'] = points_from_xy(tx_meta_interface.global_x,tx_meta_interface.global_y)
     tx_meta_interface.rename({'cell':'cell_id'}, inplace=True, axis=1)
     synthetic_tx_meta = synthetic_txs.copy().drop('num',axis=1)
-    synthetic_tx_meta.columns = ['point', 'gene', 'cell_id','neighbor']
+    synthetic_tx_meta.columns = ['point', 'gene', 'cell_id','neighbor','x','y']
     synthetic_tx_meta['tx_type'] = 'synthetic'
+    # remove original TXs from original interface tumors
     tx_meta_interface = pd.concat([tx_meta_interface, synthetic_tx_meta])
     tx_meta_interface = GeoDataFrame(tx_meta_interface, geometry='point')
     keep = ['gene', 'point', 'cell_id', 'tx_type', 'x', 'y','neighbor']
-    tx_meta_interface[['x', 'y']] = tx_meta_interface['point'].get_coordinates()
-    # tx_meta_interface['x'] = tx_meta_interface.point.apply(lambda x: np.array(x.xy).flatten()[0])
-    # tx_meta_interface['y'] = tx_meta_interface.point.apply(lambda x: np.array(x.xy).flatten()[1])
     tx_meta_interface = tx_meta_interface[keep]
+    tx_meta_interface['point'] = points_from_xy(
+        tx_meta_interface.x,tx_meta_interface.y)
     tx_meta_interface.reset_index(inplace=True, drop=True)
     tx_meta_interface.index = "tx_" + tx_meta_interface.index.astype(str)
+
+    if save_full_TX_meta:
+        tx_meta_interface.to_parquet(output_path + '/synthetic_counts_tx_metadata.parquet', index=True)
+    else:
+        permuted_tx_interface['tx_type'] = 'permuted'
+        permuted_tx_interface.index = ['permuted_tx_' + str(i) for i in range(len(permuted_tx_interface))]
+        permuted_tx_interface.rename(columns={'cell':'cell_id'}, inplace=True)
+        synthetic_tx_meta.index = ['syn_tx_' + str(i) for i in range(len(synthetic_tx_meta))]
+        tx_delta = pd.concat([permuted_tx_interface,synthetic_tx_meta])[keep]
+        tx_delta['point'] = points_from_xy(tx_delta.x,tx_delta.y)
+        GeoDataFrame(tx_delta, geometry='point').to_parquet(
+            output_path + '/tx_metadata_delta.parquet', index=True)
+
     # tx_meta_interface.index = ['tx_s_' + str(i+1) for i in range(tx_meta_interface.shape[0])]
-    synthetic_counts.to_csv(output_path + '/synthetic_counts_with_doublets.csv')
-    tx_meta_interface.to_parquet(output_path + '/synthetic_counts_tx_metadata.parquet', index=True)
+    synthetic_counts = tx_meta_interface.groupby(['cell_id','gene']).count().iloc[:,0].reset_index()
+    synthetic_counts = pd.pivot(synthetic_counts, index='cell_id', columns='gene', values='point')
+    synthetic_counts.fillna(0).astype(int).to_csv(output_path + '/synthetic_counts_with_doublets.csv')
     cell_meta_synthetic.loc[synthetic_counts.index].to_csv(output_path + '/synthetic_counts_with_doublets_metadata.csv')
-    count_delta.to_csv(output_path + '/synthetic_counts_delta.csv')
+    # count_delta.to_csv(output_path + '/synthetic_counts_delta.csv')
     #%%
     # test plotting for debug purposes
     if diag:
