@@ -50,6 +50,7 @@ Also make sure the numpy version is < `2.0` and pydeseq2 is >=`0.4.6` and <`0.5`
 - numpy>=1.24,<2.0
 - anndata>=0.10,<0.11
 - pyarrow==16.1
+- polars
 - jupyter
 - ipywidgets
 
