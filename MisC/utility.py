@@ -16,7 +16,23 @@ from scipy.spatial.distance import cdist
 from scipy.spatial import KDTree
 # Typing and other info
 from typing import Optional, Union, Tuple
-from time import time
+from time import perf_counter
+from contextlib import contextmanager
+import psutil
+
+
+@contextmanager
+def process_time_ram(message):
+    print("="*30)
+    print(message)
+    t1 = t2 = perf_counter()
+    yield lambda: t2-t1
+    t2 = perf_counter()
+    print('RAM memory % used:', psutil.virtual_memory()[2])
+    # Getting usage of virtual_memory in GB ( 4th field)
+    print('RAM Used (GB):', psutil.virtual_memory()[3]/1000000000)
+    print("Done. Time taken is {0:.4f} seconds.".format(t2-t1))
+    print("="*30)
 
 
 def process_adata(adata: sc.AnnData,

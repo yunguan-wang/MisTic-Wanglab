@@ -111,14 +111,22 @@ def generate_patch_coords(adata: sc.AnnData,
     # to maximally 8GB 
     # The following formula generally underestimates by assuming all cells possess the maximal number of tx 
     max_n_cells_per_patch_can_have = 8*(1024**3)/(4*(4*max_tx + n_genes))
-    # Want to make sure roughly each patch will have at least 100 cells 
-    # But at the same time, we have enough patches 
-    if n_cells <= max_n_cells_per_patch_can_have:
-        percent_cell_per_patch = np.clip(np.max([100/n_cells, 0.01]), 
-                                         a_min=None, a_max=1)
-    else:
-        percent_cell_per_patch = np.clip(np.max([100/n_cells, max_n_cells_per_patch_can_have/n_cells/100]),
-                                         a_min=None, a_max=1)
+    
+    n_cells_per_patch = np.min([256, max_n_cells_per_patch_can_have])
+    
+    percent_cell_per_patch = np.min([n_cells_per_patch/n_cells, 0.5])
+    
+    
+    # # Want to make sure roughly each patch will have at least 100 cells 
+    # # But at the same time, we have enough patches 
+    # if n_cells <= max_n_cells_per_patch_can_have:
+    #     percent_cell_per_patch = np.clip(np.max([100/n_cells, 0.01]), 
+    #                                      a_min=None, a_max=1)
+    # else:
+    #     percent_cell_per_patch = np.clip(np.max([100/n_cells, max_n_cells_per_patch_can_have/n_cells/100]),
+    #                                      a_min=None, a_max=1)
+    
+    
     # Make sure the actual maximal number does not exceed the limit
     # Otherwise, shrink the percentage a little bit and try again 
     accept = False
