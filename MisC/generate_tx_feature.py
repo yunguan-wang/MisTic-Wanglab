@@ -22,7 +22,7 @@ from typing import Tuple
 def expression_feature(adata: sc.AnnData,
                         layer: str,
                         num_rep: int=3,
-                        method: str="split") -> Tuple[pd.DataFrame, pd.DataFrame]:
+                        method: str="split") -> Tuple[pl.DataFrame, pl.DataFrame]:
     """Use deseq2 with pseudo bulks to perform differential analysis among different cell types and cell type vs all other cell types 
 
     Parameters
@@ -51,7 +51,9 @@ def expression_feature(adata: sc.AnnData,
         aug_sample['leiden'] = adata.obs['leiden'].copy()
         aug_sample.reset_index(drop=False, names=['cell_id'],inplace=True)
         for l in tqdm(adata.uns["unique_leiden"], desc="Augmenting sample"):
-            temp = adata.to_df(layer).loc[adata.obs['leiden']!=l, :].sample(n=(adata.obs['leiden']==l).sum()).copy()
+            temp_n = np.min([(adata.obs['leiden']==l).sum(),
+                             (adata.obs['leiden']!=l).sum()])
+            temp = adata.to_df(layer).loc[adata.obs['leiden']!=l, :].sample(n=temp_n).copy()
             temp['leiden'] = "cell_type_m_"+str(l)
             temp.reset_index(drop=False, names=['cell_id'],inplace=True)
             aug_sample = pd.concat([aug_sample, temp], axis=0, join='inner', ignore_index=True)
@@ -175,6 +177,9 @@ def expression_feature(adata: sc.AnnData,
         
         exp_1v1_df.drop(columns=['log2FoldChange', 'padj'], inplace=True)
         exp_1vR_df.drop(columns=['log2FoldChange', 'padj'], inplace=True)
+    
+    exp_1v1_df = pl.from_pandas(exp_1v1_df)
+    exp_1vR_df = pl.from_pandas(exp_1vR_df)
     
     return exp_1v1_df, exp_1vR_df
 
@@ -315,14 +320,9 @@ def distance_feature(adata: sc.AnnData,
         intf_tx = intf_tx.with_columns(
             pl.Series(name='distance_feature', values=-np.log(intf_tx['neighbor_distance_rank']/(1-intf_tx['neighbor_distance_rank']))),
             pl.Series(name='prior_distance_feature', values=-np.log(intf_tx['min_neighbor_distance_rank']/(1-intf_tx['min_neighbor_distance_rank']))))
-    ########################################################
-    ########################################################
-    with process_time_ram("Convert back to pandas") as ctm:
-        intf_tx = intf_tx.drop(["neighbor_distance","min_neighbor_distance", 
-                                "cell_type", "neighbor_celltype",
-                                "neighbor_distance_rank", "min_neighbor_distance_rank"])
         
-        intf_tx = intf_tx.to_pandas()
+        intf_tx = intf_tx.drop(["neighbor_distance","min_neighbor_distance", 
+                                "neighbor_distance_rank", "min_neighbor_distance_rank"])
     
     return intf_tx
 
@@ -335,7 +335,7 @@ def generate_feature(adata: sc.AnnData,
                     mask_distance: pd.DataFrame, 
                     mask_dist_cutoff: float=1,
                     num_rep: int=3,
-                    method: str="split") -> gpd.GeoDataFrame:
+                    method: str="split") -> pl.DataFrame:
     """A wrap up function for expression_feature and distance_feature 
 
     Parameters
@@ -373,9 +373,9 @@ def generate_feature(adata: sc.AnnData,
                                                 num_rep=num_rep,
                                                 method=method)
     # Combine the two piceces of information 
-    intf_tx = intf_tx.merge(exp_1v1_df, how='left', 
+    intf_tx = intf_tx.join(exp_1v1_df, how='left', 
                             on=['cell_type', "neighbor_celltype", "gene"])
-    intf_tx = intf_tx.merge(exp_1vR_df, how='left',
+    intf_tx = intf_tx.join(exp_1vR_df, how='left',
                             on=['cell_type', "gene"])
     
     return intf_tx 

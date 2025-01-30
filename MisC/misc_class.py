@@ -5,6 +5,7 @@ import pandas as pd
 import scanpy as sc
 import geopandas as gpd
 from geopandas import read_parquet
+import polars as pl 
 # Data manipulation 
 import numpy as np
 from scipy.special import softmax
@@ -376,6 +377,13 @@ class misc(nn.Module):
         verbose : bool, optional
              Whether or not to show the details of the loss , by default False
         """
+        adata_w_leiden_xy = self.adata.to_df(self.current_layer).merge(self.adata.obs[['leiden','x','y']],
+                                                                        how='left',
+                                                                        left_index=True,
+                                                                        right_index=True)
+        adata_w_leiden_xy = pl.from_pandas(adata_w_leiden_xy, include_index=True)
+        adata_var = pl.from_pandas(self.adata.var, include_index=True)
+        
         self.train()
         for epoch in range(n_epochs):
             np.random.shuffle(self.coord_list)
@@ -383,11 +391,11 @@ class misc(nn.Module):
             train_loss = 0.0
             for minibatch_ind, coord in enumerate(self.coord_list):
                 # Load data 
-                cell_by_gene_counts, tx_features, tx_prior_features, cell_type_labels, row_index_self, row_index_neighbor, col_index = load_patch(adata=self.adata,
-                                                                                                                                intf_tx=self.intf_tx,
-                                                                                                                                coord_tuple=coord,
-                                                                                                                                layer=self.current_layer,
-                                                                                                                                model_device=self.model_device)
+                cell_by_gene_counts, tx_features, tx_prior_features, cell_type_labels, row_index_self, row_index_neighbor, col_index = load_patch(adata_w_leiden_xy=adata_w_leiden_xy,
+                                                                                                                                                  adata_var=adata_var,
+                                                                                                                                                  intf_tx=self.intf_tx,
+                                                                                                                                                  coord_tuple=coord,
+                                                                                                                                                  model_device=self.model_device)
                 # Compute likelihood, prior, and posterior 
                 reassign_probs, cell_type_logits, prior_reassign_probs = self(tx_features=tx_features, 
                                                                             tx_prior_features=tx_prior_features,                
