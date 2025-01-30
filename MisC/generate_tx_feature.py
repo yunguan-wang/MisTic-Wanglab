@@ -235,18 +235,19 @@ def distance_feature(adata: sc.AnnData,
     ########################################################
     ########################################################
     with process_time_ram("Find transcripts' NNs based on cell centroids") as ctm:
-        # Again we use KDTree to query to 3NNs
+        # Again we use KDTree to query to >3NNs
         # The logic is that point to mask distance computation takes a long time 
         # and since we are using ranks, centroid distances would be a okish substitute 
-        # The choice of 3 is that 1 of them would be itself 
+        # The choice of >3 is that 1 of them would be itself 
         # the other two, one might be of the same type the other might be of a different type 
+        kn = 5
         centroid_tree = KDTree(adata.obs[['x', 'y']])
-        dd, ii = centroid_tree.query(intf_tx[["global_x", "global_y"]], k=3, workers=-1)
+        dd, ii = centroid_tree.query(intf_tx[["global_x", "global_y"]], k=kn, workers=-1)
     ########################################################
     ########################################################
     with process_time_ram("Add NN info") as ctm:
         intf_tx = intf_tx.drop(["global_x", "global_y"])
-        intf_tx = intf_tx.select(pl.all().repeat_by(3).flatten())
+        intf_tx = intf_tx.select(pl.all().repeat_by(kn).flatten())
         
         intf_tx = intf_tx.with_columns(pl.Series(name = "neighbor_cell_id", values=adata.obs_names[ii.ravel()].values))
         intf_tx = intf_tx.with_columns(pl.Series(name = "neighbor_distance", values=dd.ravel()))

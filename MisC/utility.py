@@ -239,8 +239,7 @@ def import_data(cell_metadata: Union[str, pd.DataFrame],
 
 def calculate_mask_distance(adata: sc.AnnData,
                             cell_coords: gpd.GeoDataFrame,
-                            max_centroid_dist: float=50,
-                            min_centroid_dist: float=0) -> gpd.GeoDataFrame:
+                            max_centroid_dist: float=50) -> gpd.GeoDataFrame:
     """Calculate cell-cell distance based on their cell masks. 
 
     Parameters
@@ -251,8 +250,6 @@ def calculate_mask_distance(adata: sc.AnnData,
         The geodataframe recording the vertices of all the cells 
     max_centroid_dist : float, optional
         The threshold on cell-cell centroid distances beyond which we do not consider two cells being neighbors, by default 15
-    min_centroid_dist : float, optional
-        The threshold on cell-cell centroid distances under which we do not consider two cells being neighbors, by default 0
 
     Returns
     -------
@@ -269,7 +266,7 @@ def calculate_mask_distance(adata: sc.AnnData,
         # 
         centroid_dist_tree = KDTree(adata.obs[['x','y']])
         # The distance is sorted 
-        _, adj_ind = centroid_dist_tree.query(adata.obs[['x','y']], k=10, 
+        _, adj_ind = centroid_dist_tree.query(adata.obs[['x','y']], k=25, 
                                             distance_upper_bound=max_centroid_dist, workers=-1)
         # This will directly give us cells and their at most 10 NNs
         # However, the adj_ind is the numeric index (row number)
