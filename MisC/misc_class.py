@@ -373,8 +373,8 @@ class misc(nn.Module):
         
         if verbose:
             print("="*30)
-            print("The cross entropy loss is {} and KLD_reassign is {}".format(CEl.detach().numpy(), 
-                                                                      KLD_reassign.detach().numpy()))
+            print("The cross entropy loss is {} and KLD_reassign is {}".format(CEl.detach().cpu().numpy(), 
+                                                                      KLD_reassign.detach().cpu().numpy()))
             print("="*30) 
         return CEl + KLD_reassign
     
