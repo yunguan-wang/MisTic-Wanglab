@@ -20,7 +20,7 @@ import torch.nn.utils.parametrize as parametrize
 from MisC.utility import import_data, calculate_mask_distance,\
     binary_gumbel_softmax_sample, extract_layer_num,\
         make_reassignment_adata, make_reassignment_tx_metadata,\
-            Positive, JSONEncoder, even_split
+            Positive, JSONEncoder, even_split, process_time_ram
 from MisC.generate_tx_feature import generate_feature
 from MisC.data_loader import generate_patch_coords, load_patch
 # User entertainment
@@ -190,6 +190,13 @@ class misc(nn.Module):
                      percent_cell_per_patch: float=0.1,
                      num_overlap: int=7) -> None:
         """Generate patches represented by their coordinates 
+
+        Parameters
+        ----------
+        percent_cell_per_patch : float, optional
+            _description_, by default 0.1
+        num_overlap : int, optional
+            _description_, by default 7
         """
         self.coord_list = generate_patch_coords(adata=self.adata, 
                                                 intf_tx=self.intf_tx,
@@ -200,7 +207,6 @@ class misc(nn.Module):
         """Initialize model parameters 
 
         """
-        
         # The reassign_coefficients determines the logit of the reassigning probability of a 
         # transcript based on computed features.
         self.reassign_coefficients = nn.Linear(in_features=3, out_features=1, bias=True)
@@ -397,7 +403,8 @@ class misc(nn.Module):
             np.random.shuffle(self.coord_list)
             self.current_temperature = self.init_temperature
             train_loss = 0.0
-            for minibatch_ind, coord in tqdm(enumerate(self.coord_list)):
+            for minibatch_ind, coord in tqdm(enumerate(self.coord_list),
+                                             total=len(self.coord_list)):
                 # Load data 
                 cell_by_gene_counts, tx_features, tx_prior_features, cell_type_labels, row_index_self, row_index_neighbor, col_index = load_patch(adata_w_leiden_xy=adata_w_leiden_xy,
                                                                                                                                                   adata_var=adata_var,
@@ -450,10 +457,10 @@ class misc(nn.Module):
             tx_features_chunks = even_split(array=self.intf_tx[['distance_feature', 
                                             "neighbor_self_exp_feature", 
                                             "rest_self_exp_feature"]].to_numpy(),
-                                            chunk_size=10000)
+                                            chunk_size=np.ceil(self.intf_tx.shape[0]/100))
             reassign_hard = np.array([], dtype=float).reshape(0,1)
             reassign_probs = np.array([], dtype=float).reshape(0,1)
-            for tx_features_chunk in tx_features_chunks:
+            for tx_features_chunk in tqdm(tx_features_chunks):
                 tx_features = torch.tensor(tx_features_chunk, 
                                            dtype=torch.float32, 
                                            device=self.model_device)
@@ -613,7 +620,9 @@ class misc(nn.Module):
         
         with open(os.path.join(dir_name, model_name+"_meta.json"), "w") as f:
             json.dump(model_meta, f, cls=JSONEncoder)
-        
+            
+        with open(os.path.join(dir_name, model_name+"_tx_to_reassign_dict.json"), "w") as f:
+            json.dump(self.tx_to_reassign_dict, f, cls=JSONEncoder)
         
     def load_model(self,
                    dir_name: str,
@@ -636,6 +645,10 @@ class misc(nn.Module):
         self.prior_50_reassign_prob = model_meta['prior_50_reassign_prob']
         self.prior_5_reassign_prob = model_meta['prior_5_reassign_prob']
         self.reparametrize = model_meta['reparametrize']
+        self.tx_to_reassign_dict = json.load(open(os.path.join(dir_name, model_name+"_tx_to_reassign_dict.json")))
+        for k in self.tx_to_reassign_dict:
+            self.tx_to_reassign_dict[k] = pd.read_json(self.tx_to_reassign_dict[k])
+        
         
         self.initialize_parameters()
         checkpoint = torch.load(os.path.join(dir_name, model_name+".pt")) 

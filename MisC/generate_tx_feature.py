@@ -296,7 +296,7 @@ def distance_feature(adata: sc.AnnData,
         patch = patch.with_columns(
             (pl.col("min_neighbor_distance").rank(descending=False)/pl.col("min_neighbor_distance").count()*0.05)
             .over("cell_id").alias("min_neighbor_distance_rank"))
-        intf_tx = intf_tx.update(patch)
+        intf_tx = intf_tx.update(patch, on=["molecule_id", "cell_id"])
     ########################################################
     ########################################################
     with process_time_ram("Refine overall min with different type rank") as ctm:
@@ -314,7 +314,7 @@ def distance_feature(adata: sc.AnnData,
         patch = patch.with_columns(
             (pl.col("neighbor_distance").rank(descending=False)/pl.col("neighbor_distance").count()*0.05)
             .over("cell_id").alias("neighbor_distance_rank"))
-        intf_tx = intf_tx.update(patch)
+        intf_tx = intf_tx.update(patch, on=["molecule_id", "cell_id"])
     ########################################################
     ########################################################
     with process_time_ram("Generate final features") as ctm:

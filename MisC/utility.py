@@ -385,18 +385,19 @@ def make_reassignment_adata(adata: sc.AnnData,
     sc.AnnData
         The adjusted adata
     """
-    counts_to_subtract, counts_to_add = generate_count_patches(adata=adata,
-                                                               tx_to_reassign=tx_to_reassign)
-    layer_num = extract_layer_num(layer)
-    if trial_layer is None:
-        trial_layer = "counts_"+str(int(layer_num+1))
-        
-    # Update adata
-    adata.layers[trial_layer] = adata.layers[layer]+counts_to_add-counts_to_subtract 
-    if np.any(adata.layers[trial_layer]<0):
-        raise Exception("Negative values generated. This might be due inconsistency between the count matrix and the tx data.")
-    if preprocess:
-        adata = process_adata(adata=adata, layer=trial_layer)
+    with process_time_ram("Updating gene counts") as ctm: 
+        counts_to_subtract, counts_to_add = generate_count_patches(adata=adata,
+                                                                tx_to_reassign=tx_to_reassign)
+        layer_num = extract_layer_num(layer)
+        if trial_layer is None:
+            trial_layer = "counts_"+str(int(layer_num+1))
+            
+        # Update adata
+        adata.layers[trial_layer] = adata.layers[layer]+counts_to_add-counts_to_subtract 
+        if np.any(adata.layers[trial_layer]<0):
+            raise Exception("Negative values generated. This might be due inconsistency between the count matrix and the tx data.")
+        if preprocess:
+            adata = process_adata(adata=adata, layer=trial_layer)
     return adata
 
 
@@ -418,9 +419,10 @@ def make_reassignment_tx_metadata(tx_to_reassign: pd.DataFrame,
     """
     # To perform tx reassign, we simply need to switch the cell_id with its corresponding neighbor_cell_id
     # and update the original dataframe. We just need to make sure that the keys all match 
-    tx_to_reassign.index = tx_to_reassign['molecule_id']
-    tx_to_reassign.loc[:, ['cell_id', 'neighbor_cell_id']] = tx_to_reassign.loc[:, ['neighbor_cell_id', 'cell_id']]
-    tx_metadata.update(tx_to_reassign)
+    with process_time_ram("Updating transcript metadata") as ctm: 
+        tx_to_reassign.index = tx_to_reassign['molecule_id']
+        tx_to_reassign.loc[:, ['cell_id', 'neighbor_cell_id']] = tx_to_reassign.loc[:, ['neighbor_cell_id', 'cell_id']]
+        tx_metadata.update(tx_to_reassign)
     return tx_metadata
 
 
