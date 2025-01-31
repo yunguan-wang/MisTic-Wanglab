@@ -166,7 +166,7 @@ def main(cmdargs: argparse.Namespace):
     
     # reclustering
     # In cli, only argmax will be used 
-    m.recluster() 
+    # m.recluster() 
     
     # saving model 
     m.save_model(dir_name=cmdargs.dir_name,
