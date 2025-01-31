@@ -20,7 +20,7 @@ import torch.nn.utils.parametrize as parametrize
 from MisC.utility import import_data, calculate_mask_distance,\
     binary_gumbel_softmax_sample, extract_layer_num,\
         make_reassignment_adata, make_reassignment_tx_metadata,\
-            Positive, JSONEncoder, even_split, process_time_ram
+            Positive, JSONEncoder, even_split
 from MisC.generate_tx_feature import generate_feature
 from MisC.data_loader import generate_patch_coords, load_patch
 # User entertainment
@@ -44,8 +44,6 @@ class misc(nn.Module):
                 mask_dist_cutoff: float=1,
                 num_rep: int=3,
                 method: str="split",
-                prior_50_reassign_prob: float=0.01,
-                prior_5_reassign_prob: float=0.5,
                 reparametrize: bool=False) -> None:
         """Instantiate a misc object 
 
@@ -77,10 +75,6 @@ class misc(nn.Module):
             Number of pseudo bulks, by default 3
         method : str, optional
             Method to generate pseudo bulks. Can be split or bootstrap, by default "split"
-        prior_50_reassign_prob : float, optional
-            The prior probability of reassigning a transcript that's ranked 50% based on the distance, by default 0.01
-        prior_5_reassign_prob : float, optional
-            The prior probability of reassigning a transcript that's ranked 5% based on the distance, by default 0.5
         """
         super().__init__()
         
@@ -126,8 +120,6 @@ class misc(nn.Module):
         self.model_device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.n_genes = None
         self.n_leiden = None
-        self.prior_50_reassign_prob = prior_50_reassign_prob
-        self.prior_5_reassign_prob = prior_5_reassign_prob
         self.reparametrize = reparametrize
         self.reassign_coefficients = None 
         self.prior_reassign_coefficients = None
@@ -188,25 +180,27 @@ class misc(nn.Module):
         
     def patchfy_data(self,
                      percent_cell_per_patch: float=0.1,
-                     num_overlap: int=7) -> None:
+                     n_rep: int=7) -> None:
         """Generate patches represented by their coordinates 
-
-        Parameters
-        ----------
-        percent_cell_per_patch : float, optional
-            _description_, by default 0.1
-        num_overlap : int, optional
-            _description_, by default 7
         """
         self.coord_list = generate_patch_coords(adata=self.adata, 
                                                 intf_tx=self.intf_tx,
                                                 percent_cell_per_patch=percent_cell_per_patch,
-                                                num_overlap=num_overlap) 
+                                                n_rep=n_rep) 
     
-    def initialize_parameters(self) -> None:
+    def initialize_parameters(self,
+                              prior_50_reassign_prob: float=0.01,
+                              prior_5_reassign_prob: float=0.5) -> None:
         """Initialize model parameters 
 
+        Parameters
+        ----------
+        prior_50_reassign_prob : float, optional
+            The prior probability of reassigning a transcript that's ranked 50% based on the distance, by default 0.01
+        prior_5_reassign_prob : float, optional
+            The prior probability of reassigning a transcript that's ranked 5% based on the distance, by default 0.5
         """
+        
         # The reassign_coefficients determines the logit of the reassigning probability of a 
         # transcript based on computed features.
         self.reassign_coefficients = nn.Linear(in_features=3, out_features=1, bias=True)
@@ -215,9 +209,9 @@ class misc(nn.Module):
             parametrize.register_parametrization(self.reassign_coefficients, "weight", Positive())
         
         self.prior_reassign_coefficients = nn.Linear(in_features=1, out_features=1, bias=True)
-        alpha_0 = -np.log(1/self.prior_50_reassign_prob-1+1e-20)
+        alpha_0 = -np.log(1/prior_50_reassign_prob-1+1e-20)
         temp = -np.log(0.05/0.95)
-        alpha_1 = (-np.log(1/self.prior_5_reassign_prob-1+1e-20) - alpha_0)/temp
+        alpha_1 = (-np.log(1/prior_5_reassign_prob-1+1e-20) - alpha_0)/temp
         self.prior_reassign_coefficients.bias = nn.Parameter(torch.tensor(alpha_0, dtype=torch.float32).reshape_as(self.prior_reassign_coefficients.bias))
         self.prior_reassign_coefficients.weight = nn.Parameter(torch.tensor(alpha_1, dtype=torch.float32).reshape_as(self.prior_reassign_coefficients.weight))
         for param in self.prior_reassign_coefficients.parameters():
@@ -403,8 +397,7 @@ class misc(nn.Module):
             np.random.shuffle(self.coord_list)
             self.current_temperature = self.init_temperature
             train_loss = 0.0
-            for minibatch_ind, coord in tqdm(enumerate(self.coord_list),
-                                             total=len(self.coord_list)):
+            for minibatch_ind, coord in tqdm(enumerate(self.coord_list)):
                 # Load data 
                 cell_by_gene_counts, tx_features, tx_prior_features, cell_type_labels, row_index_self, row_index_neighbor, col_index = load_patch(adata_w_leiden_xy=adata_w_leiden_xy,
                                                                                                                                                   adata_var=adata_var,
@@ -457,10 +450,10 @@ class misc(nn.Module):
             tx_features_chunks = even_split(array=self.intf_tx[['distance_feature', 
                                             "neighbor_self_exp_feature", 
                                             "rest_self_exp_feature"]].to_numpy(),
-                                            chunk_size=np.ceil(self.intf_tx.shape[0]/100))
+                                            chunk_size=10000)
             reassign_hard = np.array([], dtype=float).reshape(0,1)
             reassign_probs = np.array([], dtype=float).reshape(0,1)
-            for tx_features_chunk in tqdm(tx_features_chunks):
+            for tx_features_chunk in tx_features_chunks:
                 tx_features = torch.tensor(tx_features_chunk, 
                                            dtype=torch.float32, 
                                            device=self.model_device)
@@ -595,8 +588,7 @@ class misc(nn.Module):
         
     def save_model(self,
                    dir_name: str,
-                   model_name: str,
-                   save_reassigning_result: bool=False) -> None:
+                   model_name: str) -> None:
         """Save the model
 
         Parameters
@@ -615,21 +607,34 @@ class misc(nn.Module):
                       'generate_feature_par': self.generate_feature_par,
                       'n_genes': self.n_genes,
                       'n_leiden': self.n_leiden,
-                      'prior_50_reassign_prob': self.prior_50_reassign_prob,
-                      'prior_5_reassign_prob': self.prior_5_reassign_prob,
-                      'reparametrize': self.reparametrize,
-                      "save_reassigning_result": save_reassigning_result}
+                      'reparametrize': self.reparametrize}
         
-        with open(os.path.join(dir_name, model_name+"_meta.json"), "w") as f:
-            json.dump(model_meta, f, cls=JSONEncoder)
-            
-        if save_reassigning_result:
-            with open(os.path.join(dir_name, model_name+"_tx_to_reassign_dict.json"), "w") as f:
-                json.dump(self.tx_to_reassign_dict, f, cls=JSONEncoder)
+        
+        
+        
+        
+        # Since h5ad does not support saving geopandas 
+        self.adata.obs = pd.DataFrame(self.adata.obs)
+        self.adata.obs.drop(columns=['cell_centroid_geom'], inplace=True)
+        self.adata.write_h5ad(os.path.join(dir_name, "adata.h5ad"))
+        self.adata.obs = gpd.GeoDataFrame(self.adata.obs,
+                                geometry=gpd.points_from_xy(self.adata.obs['x'], self.adata.obs['y']))
+        self.adata.obs.rename_geometry("cell_centroid_geom", inplace=True)
+        
+        # Then other files 
+        self.tx_metadata.to_parquet(os.path.join(dir_name, "tx_metadata.parquet"),
+                                    index=True)
+        self.cell_coords.to_parquet(os.path.join(dir_name, "cell_coords.parquet"),
+                                    index=True)
+        self.mask_distance.to_parquet(os.path.join(dir_name, "mask_distance.parquet"),
+                                    index=True)
+        self.intf_tx.to_parquet(os.path.join(dir_name, "intf_tx.parquet"),
+                                index=True)
+        with open(os.path.join(dir_name, "tx_to_reassign_dict.json"), "w") as f:
+            json.dump(self.tx_to_reassign_dict, f, cls=JSONEncoder)
         
     def load_model(self,
-                   dir_name: str,
-                   model_name: str) -> None:
+                   path: str) -> None:
         """Load the model
 
         Parameters
@@ -638,29 +643,27 @@ class misc(nn.Module):
             The path to the torch model. It should end with .pt 
             Other pieces of information will be saved in the same directory 
         """
-        
-        model_meta = json.load(open(os.path.join(dir_name, model_name+"_meta.json")))
-        self.import_data_par = model_meta['import_data_par']
-        self.calculate_mask_distance_par = model_meta['calculate_mask_distance_par']
-        self.generate_feature_par = model_meta['generate_feature_par']
-        self.n_genes = model_meta['n_genes']
-        self.n_leiden = model_meta['n_leiden']
-        self.prior_50_reassign_prob = model_meta['prior_50_reassign_prob']
-        self.prior_5_reassign_prob = model_meta['prior_5_reassign_prob']
-        self.reparametrize = model_meta['reparametrize']
-        
-        save_reassigning_result = model_meta['save_reassigning_result']
-        if save_reassigning_result:
-            self.tx_to_reassign_dict = json.load(open(os.path.join(dir_name, model_name+"_tx_to_reassign_dict.json")))
-            for k in self.tx_to_reassign_dict:
-                self.tx_to_reassign_dict[k] = pd.read_json(self.tx_to_reassign_dict[k])
-        
+        dir_name = os.path.dirname(path)
+        self.adata = sc.read_h5ad(os.path.join(dir_name, "adata.h5ad"))
+        # Reconstruct the geodataframe 
+        self.adata.obs = gpd.GeoDataFrame(self.adata.obs,
+                                geometry=gpd.points_from_xy(self.adata.obs['x'], self.adata.obs['y']))
+        self.adata.obs.rename_geometry("cell_centroid_geom", inplace=True)
+        self.current_layer = self.adata.uns['current_layer']
         
         self.initialize_parameters()
-        checkpoint = torch.load(os.path.join(dir_name, model_name+".pt")) 
+        checkpoint = torch.load(path) 
         self.load_state_dict(checkpoint['model_state_dict'])
         self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         
-        
+        # Other files 
+        self.tx_metadata = read_parquet(os.path.join(dir_name, "tx_metadata.parquet"))
+        self.cell_coords = read_parquet(os.path.join(dir_name, "cell_coords.parquet"))
+        self.mask_distance = read_parquet(os.path.join(dir_name, "mask_distance.parquet"))
+        self.intf_tx = read_parquet(os.path.join(dir_name, "intf_tx.parquet"))
+        self.tx_to_reassign_dict = json.load(open(os.path.join(dir_name, "tx_to_reassign_dict.json")))
+        # Then convert into dataframes 
+        for k in self.tx_to_reassign_dict:
+            self.tx_to_reassign_dict[k] = pd.read_json(self.tx_to_reassign_dict[k])
             
     

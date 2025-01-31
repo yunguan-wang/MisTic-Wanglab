@@ -1,13 +1,35 @@
 ![Logo](/assets/MisC.png)
 
 # MisC
-> Reassign transcripts 
+MisC is a probabilistic model for correcting mis-assigned transcripts due to cell segmentation error. It builds on top of [PyTorch] and [scanpy].
 
 ## Installation 
 
-This is only for internal usage. We will publish the package on pypi later on. But for now, we will just build the package locally. 
+1. Create a virtual environment
 
-1. Clone the repo to a local directory, say `./awesome_repos` and `cd` to that folder. 
+We have only tested the software on Python 3.9 and 3.10.
+
+```shell
+conda create -n misc python=3.9
+conda activate misc 
+```
+
+or 
+
+```shell
+conda create -n misc python=3.9
+conda activate misc 
+```
+
+2. For pip (currently not working)
+
+```shell
+pip install txMisC
+```
+
+3. Build locally 
+
+Clone the repo to a local directory, say `./awesome_repos` and `cd` to that folder. 
 
 2. Now, you should have a `MisC` folder under the `awesome_repos` directory. 
 ```shell 
@@ -50,6 +72,7 @@ Also make sure the numpy version is < `2.0` and pydeseq2 is >=`0.4.6` and <`0.5`
 - numpy>=1.24,<2.0
 - anndata>=0.10,<0.11
 - pyarrow==16.1
+- polars==1.21
 - jupyter
 - ipywidgets
 
@@ -88,3 +111,7 @@ Writing software documentation is like cleaning your room—everyone agrees it�
 
 ## Citation
 Citing a paper is like sending a thank-you note—it’s polite, necessary, and half the time you’re just copying what someone else did.
+
+
+[pytorch]: https://pytorch.org
+[scanpy]: http://scanpy.readthedocs.io/

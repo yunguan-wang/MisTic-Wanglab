@@ -16,7 +16,23 @@ from scipy.spatial.distance import cdist
 from scipy.spatial import KDTree
 # Typing and other info
 from typing import Optional, Union, Tuple
-from time import time
+from time import perf_counter
+from contextlib import contextmanager
+import psutil
+
+
+@contextmanager
+def process_time_ram(message: str=""):
+    print("="*30)
+    print(message)
+    t1 = t2 = perf_counter()
+    yield lambda: t2-t1
+    t2 = perf_counter()
+    print('RAM memory % used:', psutil.virtual_memory()[2])
+    # Getting usage of virtual_memory in GB ( 4th field)
+    print('RAM Used (GB):', psutil.virtual_memory()[3]/1000000000)
+    print("Done. Time taken is {0:.4f} seconds.".format(t2-t1))
+    print("="*30)
 
 
 def process_adata(adata: sc.AnnData,
@@ -101,141 +117,129 @@ def import_data(cell_metadata: Union[str, pd.DataFrame],
     """
 
     # Cell metadata
-    print("Processing cell metadata")
-    start_time = time()
-    if isinstance(cell_metadata, str) and ("csv" in os.path.splitext(cell_metadata)[1]):
-        cell_meta = pd.read_csv(cell_metadata, index_col=0)
-    elif isinstance(cell_metadata, pd.DataFrame):
-        cell_meta = cell_metadata
-    else: 
-        raise TypeError("Only .csv file or pandas dataframe is allowed")
-    cell_meta.index.rename(name='cell_id', inplace=True)
-    cell_meta.rename(columns={cell_centroid_x_col: "center_x",
-                              cell_centroid_y_col: "center_y"}, inplace=True, errors='raise')
-    end_time = time()
-    print("Done. Time taken is {}".format(end_time-start_time))
-    # Polygons of cells 
-    print("Processing cell boundaries")
-    start_time = time()
-    if isinstance(cell_boundary_polygons, str) and ("parquet" in os.path.splitext(cell_boundary_polygons)[1]):
-        cell_coords = read_parquet(cell_boundary_polygons)
-    elif isinstance(cell_boundary_polygons, gpd.GeoDataFrame):
-        cell_coords = cell_boundary_polygons
-    else: 
-        raise TypeError("Only .parquet file or geopandas dataframe is allowed")
-    cell_coords.index.rename(name='cell_id', inplace=True)
-    if cell_coords.geometry.name != "cell_boundary_geom":
-        cell_coords.rename_geometry("cell_boundary_geom", inplace=True)
-    # Remove potential duplicated vertices in a polygon
-    cell_coords['cell_boundary_geom'] = cell_coords['cell_boundary_geom'].remove_repeated_points(tolerance=0.0)
-    end_time = time()
-    print("Done. Time taken is {}".format(end_time-start_time))
-    # Transcript information 
-    print("Processing Transcript information ")
-    start_time = time()
-    # We also convert the pandas dataframe to geopandas geodataframe 
-    # by constructing points from the locations of each transcript
-    if isinstance(detected_transcripts, str) and ("parquet" in os.path.splitext(detected_transcripts)[1]):
-        tx_metadata = read_parquet(detected_transcripts)
-    elif isinstance(detected_transcripts, str) and ("csv" in os.path.splitext(detected_transcripts)[1]):
-        tx_metadata = pd.read_csv(detected_transcripts, index_col=0)    
-    elif isinstance(detected_transcripts, pd.DataFrame) or isinstance(detected_transcripts, gpd.GeoDataFrame):
-        tx_metadata = detected_transcripts
-    else: 
-        raise TypeError("Only .parquet/.csv file or geopandas/pandas dataframe is allowed")
-
-    if not isinstance(tx_metadata, gpd.GeoDataFrame):
-        tx_metadata = gpd.GeoDataFrame(tx_metadata, 
-                                       geometry=gpd.points_from_xy(tx_metadata[tx_x_col], tx_metadata[tx_y_col]))
-    
-    tx_metadata.reset_index(drop=True, inplace=True)
-    tx_metadata.index = "tx_" + tx_metadata.index.astype(str)
-    tx_metadata['molecule_id'] = tx_metadata.index
-    if tx_metadata.geometry.name != "tx_geom":
-        tx_metadata.rename_geometry("tx_geom", inplace=True)
-    tx_metadata.rename(
-        columns={
-            gene_col: 'gene',
-            cell_col: 'cell_id'
-            }, inplace=True, errors='raise')
-    end_time = time()
-    print("Done. Time taken is {}".format(end_time-start_time))
-    # Cell by gene counts matrix 
-    print("Processing cell by gene matrix")
-    start_time = time()
-    if cell_by_gene_counts is not None:
-        if isinstance(cell_by_gene_counts, str) and ("csv" in os.path.splitext(cell_by_gene_counts)[1]):
-            counts = pd.read_csv(cell_by_gene_counts, index_col=0)
-        elif isinstance(cell_by_gene_counts, pd.DataFrame):
-            counts = cell_by_gene_counts
+    with process_time_ram("Processing cell metadata") as ctm:
+        if isinstance(cell_metadata, str) and ("csv" in os.path.splitext(cell_metadata)[1]):
+            cell_meta = pd.read_csv(cell_metadata, index_col=0)
+        elif isinstance(cell_metadata, pd.DataFrame):
+            cell_meta = cell_metadata
         else: 
             raise TypeError("Only .csv file or pandas dataframe is allowed")
-    else: 
-        counts = tx_metadata.groupby(['cell_id', "gene"],
-                                     as_index=False)['molecule_id'].count()
-        counts = pd.pivot(counts, values='molecule_id', columns="gene", index='cell_id').fillna(0)
+        cell_meta.index.rename(name='cell_id', inplace=True)
+        cell_meta.rename(columns={cell_centroid_x_col: "center_x",
+                                cell_centroid_y_col: "center_y"}, inplace=True, errors='raise')
+
+    # Polygons of cells 
+    with process_time_ram("Processing cell boundaries") as ctm:
+        if isinstance(cell_boundary_polygons, str) and ("parquet" in os.path.splitext(cell_boundary_polygons)[1]):
+            cell_coords = read_parquet(cell_boundary_polygons)
+        elif isinstance(cell_boundary_polygons, gpd.GeoDataFrame):
+            cell_coords = cell_boundary_polygons
+        else: 
+            raise TypeError("Only .parquet file or geopandas dataframe is allowed")
+        cell_coords.index.rename(name='cell_id', inplace=True)
+        if cell_coords.geometry.name != "cell_boundary_geom":
+            cell_coords.rename_geometry("cell_boundary_geom", inplace=True)
+        # Remove potential duplicated vertices in a polygon
+        cell_coords['cell_boundary_geom'] = cell_coords['cell_boundary_geom'].remove_repeated_points(tolerance=0.0)
+
+    # Transcript information 
+    with process_time_ram("Processing Transcript information ") as ctm:
+        # We also convert the pandas dataframe to geopandas geodataframe 
+        # by constructing points from the locations of each transcript
+        if isinstance(detected_transcripts, str) and ("parquet" in os.path.splitext(detected_transcripts)[1]):
+            tx_metadata = read_parquet(detected_transcripts)
+        elif isinstance(detected_transcripts, str) and ("csv" in os.path.splitext(detected_transcripts)[1]):
+            tx_metadata = pd.read_csv(detected_transcripts, index_col=0)    
+        elif isinstance(detected_transcripts, pd.DataFrame) or isinstance(detected_transcripts, gpd.GeoDataFrame):
+            tx_metadata = detected_transcripts
+        else: 
+            raise TypeError("Only .parquet/.csv file or geopandas/pandas dataframe is allowed")
+
+        if not isinstance(tx_metadata, gpd.GeoDataFrame):
+            tx_metadata = gpd.GeoDataFrame(tx_metadata, 
+                                        geometry=gpd.points_from_xy(tx_metadata[tx_x_col], tx_metadata[tx_y_col]))
         
-    counts.index.rename(name='cell_id', inplace=True)
-    end_time = time()
-    print("Done. Time taken is {}".format(end_time-start_time))
+        tx_metadata.reset_index(drop=True, inplace=True)
+        tx_metadata.index = "tx_" + tx_metadata.index.astype(str)
+        tx_metadata['molecule_id'] = tx_metadata.index
+        if tx_metadata.geometry.name != "tx_geom":
+            tx_metadata.rename_geometry("tx_geom", inplace=True)
+        tx_metadata.rename(
+            columns={
+                gene_col: 'gene',
+                cell_col: 'cell_id'
+                }, inplace=True, errors='raise')
+        
+    # Cell by gene counts matrix 
+    with process_time_ram("Processing cell by gene matrix") as ctm:
+        if cell_by_gene_counts is not None:
+            if isinstance(cell_by_gene_counts, str) and ("csv" in os.path.splitext(cell_by_gene_counts)[1]):
+                counts = pd.read_csv(cell_by_gene_counts, index_col=0)
+            elif isinstance(cell_by_gene_counts, pd.DataFrame):
+                counts = cell_by_gene_counts
+            else: 
+                raise TypeError("Only .csv file or pandas dataframe is allowed")
+        else: 
+            counts = tx_metadata.groupby(['cell_id', "gene"],
+                                        as_index=False)['molecule_id'].count()
+            counts = pd.pivot(counts, values='molecule_id', columns="gene", index='cell_id').fillna(0)
+            
+        counts.index.rename(name='cell_id', inplace=True)
+
     # Create AnnData object to store the counts 
     # and facilitate future processing 
-    print("Creating AnnData object")
-    start_time = time()
-    adata = sc.AnnData(counts)
-    adata.obs['x'] = cell_meta.loc[adata.obs_names, "center_x"]
-    adata.obs['y'] = cell_meta.loc[adata.obs_names, "center_y"]
-    adata.obs = gpd.GeoDataFrame(adata.obs,
-                                 geometry=gpd.points_from_xy(adata.obs['x'], adata.obs['y']))
-    adata.obs.rename_geometry("cell_centroid_geom", inplace=True)
-    adata.var['col_index'] = [i for i in range(adata.var.shape[0])]
-    # As we will alter the counts later on, we will save a copy of the 
-    # original count in one of the layers 
-    adata.layers['counts_0'] = adata.X.copy()
-    adata.raw = adata.copy()
-    end_time = time()
-    print("Done. Time taken is {}".format(end_time-start_time))
+    with process_time_ram("Creating AnnData object") as ctm:
+        adata = sc.AnnData(counts)
+        adata.obs['x'] = cell_meta.loc[adata.obs_names, "center_x"]
+        adata.obs['y'] = cell_meta.loc[adata.obs_names, "center_y"]
+        adata.obs = gpd.GeoDataFrame(adata.obs,
+                                    geometry=gpd.points_from_xy(adata.obs['x'], adata.obs['y']))
+        adata.obs.rename_geometry("cell_centroid_geom", inplace=True)
+        adata.var['col_index'] = [i for i in range(adata.var.shape[0])]
+        # As we will alter the counts later on, we will save a copy of the 
+        # original count in one of the layers 
+        adata.layers['counts_0'] = adata.X.copy()
+        adata.raw = adata.copy()
+    
     if preprocess:
         # Then we perform basic normalization and transformation 
-        print("="*30)
-        print("Successfully read in data. Performing basic transformation")
-        adata = process_adata(adata=adata,
-                            layer="counts_0")
+        with process_time_ram("Successfully read in data. Performing basic transformation") as ctm:
+            adata = process_adata(adata=adata,
+                                layer="counts_0")
     # And we will use leiden to perform cell clustering
     if celltype_col is not None:
-        print("Assigning pre-existing cell typing info from metadata.")
-        adata.obs['cell_type'] = cell_meta.loc[adata.obs_names, celltype_col]
-        adata.obs['leiden'] = pd.factorize(cell_meta.loc[adata.obs_names, celltype_col])[0].astype(str)
+        with process_time_ram("Assigning pre-existing cell typing info from metadata.") as ctm:
+            adata.obs['cell_type'] = cell_meta.loc[adata.obs_names, celltype_col]
+            adata.obs['leiden'] = pd.factorize(cell_meta.loc[adata.obs_names, celltype_col])[0].astype(str)
     else:
-        print("Performing Leiden clustering.")
-        sc.tl.leiden(adata, resolution=leiden_res, key_added='cell_type')
-        adata.obs['leiden'] = adata.obs['cell_type'].astype(str)
-    # leiden always stores the latest version 
-    adata.obs['counts_0_leiden'] = adata.obs['leiden'].copy()
-    # Record some meta information 
-    adata.uns['unique_leiden'] = np.unique(adata.obs['counts_0_leiden'])
-    adata.uns['n_leiden'] = len(adata.uns['unique_leiden'])
-    adata.uns['cell_type_leiden_map'] = adata.obs[["cell_type", "leiden"]].drop_duplicates(ignore_index=True)
-    adata.uns['cell_type_leiden_map'].rename(columns={"cell_type": "cell_type_name",
-                                                      "leiden": "cell_type_index"},
-                                             inplace=True)
-    adata.uns['centroid_x_min'] = adata.obs['x'].min()
-    adata.uns['centroid_x_max'] = adata.obs['x'].max()
-    adata.uns['centroid_y_min'] = adata.obs['y'].min()
-    adata.uns['centroid_y_max'] = adata.obs['y'].max()
-    adata.uns['n_genes'] = adata.var.shape[0]
-    adata.uns['current_layer'] = "counts_0"
+        with process_time_ram("Performing Leiden clustering.") as ctm:
+            sc.tl.leiden(adata, resolution=leiden_res, key_added='cell_type')
+            adata.obs['leiden'] = adata.obs['cell_type'].astype(str)
     
-    print("Done~")
-    print("="*30)
+    with process_time_ram("Adding meta info to adata") as ctm:
+        # leiden always stores the latest version 
+        adata.obs['counts_0_leiden'] = adata.obs['leiden'].copy()
+        # Record some meta information 
+        adata.uns['unique_leiden'] = np.unique(adata.obs['counts_0_leiden'])
+        adata.uns['n_leiden'] = len(adata.uns['unique_leiden'])
+        adata.uns['cell_type_leiden_map'] = adata.obs[["cell_type", "leiden"]].drop_duplicates(ignore_index=True)
+        adata.uns['cell_type_leiden_map'].rename(columns={"cell_type": "cell_type_name",
+                                                        "leiden": "cell_type_index"},
+                                                inplace=True)
+        adata.uns['centroid_x_min'] = adata.obs['x'].min()
+        adata.uns['centroid_x_max'] = adata.obs['x'].max()
+        adata.uns['centroid_y_min'] = adata.obs['y'].min()
+        adata.uns['centroid_y_max'] = adata.obs['y'].max()
+        adata.uns['n_genes'] = adata.var.shape[0]
+        adata.uns['current_layer'] = "counts_0"
+    
     return adata, cell_coords, tx_metadata
     
 
 
 def calculate_mask_distance(adata: sc.AnnData,
                             cell_coords: gpd.GeoDataFrame,
-                            max_centroid_dist: float=50,
-                            min_centroid_dist: float=0) -> gpd.GeoDataFrame:
+                            max_centroid_dist: float=50) -> gpd.GeoDataFrame:
     """Calculate cell-cell distance based on their cell masks. 
 
     Parameters
@@ -246,8 +250,6 @@ def calculate_mask_distance(adata: sc.AnnData,
         The geodataframe recording the vertices of all the cells 
     max_centroid_dist : float, optional
         The threshold on cell-cell centroid distances beyond which we do not consider two cells being neighbors, by default 15
-    min_centroid_dist : float, optional
-        The threshold on cell-cell centroid distances under which we do not consider two cells being neighbors, by default 0
 
     Returns
     -------
@@ -255,49 +257,36 @@ def calculate_mask_distance(adata: sc.AnnData,
         A dataframe where each row is a pair of neighboring cells as well as their distance information 
     """
     
-    # # First, we compute cell-cell distance matrix based on their recorded centroids 
-    # centroid_dist = cdist(adata.obs[['x','y']],adata.obs[['x','y']])
-    # centroid_dist = pd.DataFrame(centroid_dist, index = adata.obs_names, columns=adata.obs_names)
-    # # As computing mask distances between all pairs of cells would take too long
-    # # we use the centroid distance to filter out the majority of the cells 
-    # # We then create the adjacency matrix: 
-    # # Any cell that is within in the specified threshold: max_centroid_dist is considered a neighbor
-    # adj = (centroid_dist > min_centroid_dist) & (centroid_dist<= max_centroid_dist)
-    # # For each cell, we record its neighbors as a list
-    # adj = adj.agg(lambda x: adj.columns[x.values].tolist(), axis=1)
-    # adj = pd.DataFrame(adj, columns = ['n'])
-    # adj = adj[adj['n'].apply(len)>0]
-    
-    
-    
-    print("Compute cell-cell distance matrix based on their recorded centroids")
-    start_time = time()
-    centroid_dist_tree = KDTree(adata.obs[['x','y']])
-    # The distance is sorted 
-    _, adj_ind = centroid_dist_tree.query(adata.obs[['x','y']], k=10, 
-                                          distance_upper_bound=max_centroid_dist, workers=-1)
-    adj = pd.DataFrame(adj_ind, index=adata.obs_names).melt(ignore_index=False).drop(columns=['variable'])
-    adj = adj[adj['value']<adata.obs.shape[0]]
-    adj.loc[:,'n'] = adata.obs_names[adj['value']]
-    adj_masks_ids = adj[adj.index != adj.loc[:, "n"]].drop(columns=['value'])
-    end_time = time()
-    print("Done. Time taken is {}".format(end_time-start_time))
-    
+    with process_time_ram("Compute cell-cell distance matrix based on their recorded centroids") as ctm:
+        # First, we compute cell-cell distance matrix based on their recorded centroids 
+        # As computing mask distances between all pairs of cells would take too long
+        # we use the centroid distance to filter out the majority of the cells 
+        # However, direct computation would consume a huge chunk of memory. Therefore, we use KDTree to 
+        # find nearest neighbors. Currently, the number is set to 10 with an upper bound 
+        # 
+        centroid_dist_tree = KDTree(adata.obs[['x','y']])
+        # The distance is sorted 
+        _, adj_ind = centroid_dist_tree.query(adata.obs[['x','y']], k=25, 
+                                            distance_upper_bound=max_centroid_dist, workers=-1)
+        # This will directly give us cells and their at most 10 NNs
+        # However, the adj_ind is the numeric index (row number)
+        adj = pd.DataFrame(adj_ind, index=adata.obs_names).melt(ignore_index=False).drop(columns=['variable'])
+        # Filter out values due to upper bound 
+        adj = adj[adj['value']<adata.obs.shape[0]]
+        # Replace row number by actual cell id 
+        adj.loc[:,'n'] = adata.obs_names[adj['value']]
+        adj_masks_ids = adj[adj.index != adj.loc[:, "n"]].drop(columns=['value'])
     # Then we compute the cell-cell distance based on their masks
-    # adj_masks_ids = adj.explode(column=['n'])
-    print("Compute cell-cell distance matrix based on their masks")
-    start_time = time()
-    md = distance(
-        cell_coords.loc[adj_masks_ids.index, "cell_boundary_geom"].values,
-        cell_coords.loc[adj_masks_ids['n'].values, "cell_boundary_geom"].values
-    )
-    mask_distance = gpd.GeoDataFrame(adj_masks_ids).rename(columns={"n": "neighbor_cell_id"})
-    mask_distance['mask_distance'] = md
-    mask_distance.reset_index(inplace=True, drop=False)
-    mask_distance = mask_distance.merge(adata.obs[['x', 'y', 'cell_centroid_geom']], how='left', 
-                                        left_on='cell_id', right_index=True).set_geometry("cell_centroid_geom")
-    end_time = time()
-    print("Done. Time taken is {}".format(end_time-start_time))
+    with process_time_ram("Compute cell-cell distance matrix based on their masks") as ctm:
+        md = distance(
+            cell_coords.loc[adj_masks_ids.index, "cell_boundary_geom"].values,
+            cell_coords.loc[adj_masks_ids['n'].values, "cell_boundary_geom"].values
+        )
+        mask_distance = gpd.GeoDataFrame(adj_masks_ids).rename(columns={"n": "neighbor_cell_id"})
+        mask_distance['mask_distance'] = md
+        mask_distance.reset_index(inplace=True, drop=False)
+        mask_distance = mask_distance.merge(adata.obs[['x', 'y', 'cell_centroid_geom']], how='left', 
+                                            left_on='cell_id', right_index=True).set_geometry("cell_centroid_geom")
     return mask_distance
 
 
@@ -396,18 +385,19 @@ def make_reassignment_adata(adata: sc.AnnData,
     sc.AnnData
         The adjusted adata
     """
-    counts_to_subtract, counts_to_add = generate_count_patches(adata=adata,
-                                                               tx_to_reassign=tx_to_reassign)
-    layer_num = extract_layer_num(layer)
-    if trial_layer is None:
-        trial_layer = "counts_"+str(int(layer_num+1))
-        
-    # Update adata
-    adata.layers[trial_layer] = adata.layers[layer]+counts_to_add-counts_to_subtract 
-    if np.any(adata.layers[trial_layer]<0):
-        raise Exception("Negative values generated. This might be due inconsistency between the count matrix and the tx data.")
-    if preprocess:
-        adata = process_adata(adata=adata, layer=trial_layer)
+    with process_time_ram("Updating gene counts") as ctm: 
+        counts_to_subtract, counts_to_add = generate_count_patches(adata=adata,
+                                                                tx_to_reassign=tx_to_reassign)
+        layer_num = extract_layer_num(layer)
+        if trial_layer is None:
+            trial_layer = "counts_"+str(int(layer_num+1))
+            
+        # Update adata
+        adata.layers[trial_layer] = adata.layers[layer]+counts_to_add-counts_to_subtract 
+        if np.any(adata.layers[trial_layer]<0):
+            raise Exception("Negative values generated. This might be due inconsistency between the count matrix and the tx data.")
+        if preprocess:
+            adata = process_adata(adata=adata, layer=trial_layer)
     return adata
 
 
@@ -429,9 +419,10 @@ def make_reassignment_tx_metadata(tx_to_reassign: pd.DataFrame,
     """
     # To perform tx reassign, we simply need to switch the cell_id with its corresponding neighbor_cell_id
     # and update the original dataframe. We just need to make sure that the keys all match 
-    tx_to_reassign.index = tx_to_reassign['molecule_id']
-    tx_to_reassign.loc[:, ['cell_id', 'neighbor_cell_id']] = tx_to_reassign.loc[:, ['neighbor_cell_id', 'cell_id']]
-    tx_metadata.update(tx_to_reassign)
+    with process_time_ram("Updating transcript metadata") as ctm: 
+        tx_to_reassign.index = tx_to_reassign['molecule_id']
+        tx_to_reassign.loc[:, ['cell_id', 'neighbor_cell_id']] = tx_to_reassign.loc[:, ['neighbor_cell_id', 'cell_id']]
+        tx_metadata.update(tx_to_reassign)
     return tx_metadata
 
 

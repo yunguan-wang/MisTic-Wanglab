@@ -52,14 +52,16 @@ parser.add_argument("--no_preprocess", action="store_true",
                     help="If specified, no data processing including UMAP will be computed")
 parser.add_argument("--max_centroid_dist", type=float, default=50,
                     help="When computing mask distances, if a centroid distance is greater than this value, the mask distance will not be computed.")
-parser.add_argument("--min_centroid_dist", type=float, default=0,
-                    help="When computing mask distances, if a centroid distance is lower than this value, the mask distance will not be computed.")
 parser.add_argument("--mask_dist_cutoff", type=float, default=1,
                     help="The threshold of cell-cell mask distances beyond which a cell is no longer considered a neighbor")
 parser.add_argument("--num_rep", type=int, default=3,
-                    help="Number of repetitions in case of method='bootstrap' or number of chuns in case of method='split'")
+                    help="Number of repetitions in case of method='bootstrap' or number of chunks in case of method='split'")
 parser.add_argument("--method", type=str, default="split",
                     help="The method to generate pseudo bulks")
+parser.add_argument("--prior_50_reassign_prob", type=float, default=0.01,
+                    help="The prior probability of reassigning a transcript that's ranked 50% based on the distance")
+parser.add_argument("--prior_5_reassign_prob", type=float, default=0.5,
+                    help="The prior probability of reassigning a transcript that's ranked 5% based on the distance")
 parser.add_argument("--reparametrize", action="store_true",
                     help="Whether or not to force positivity on coefficients")
 
@@ -74,10 +76,10 @@ parser.add_argument("--cell_by_gene_counts", type=str,
                     help="The path to the csv file that contains the cell by gene count. If not provided, this will be inferred from the detected transcript file.")
 
 # Model training 
-parser.add_argument("--prior_50_reassign_prob", type=float, default=0.01,
-                    help="The prior probability of reassigning a transcript that's ranked 50% based on the distance")
-parser.add_argument("--prior_5_reassign_prob", type=float, default=0.5,
-                    help="The prior probability of reassigning a transcript that's ranked 5% based on the distance")
+parser.add_argument("--percent_cell_per_patch", type=float, default=0.1,
+                    help="The rough percentage of cells within each minibatch")
+parser.add_argument("--num_overlap", type=int, default=7,
+                    help='Number of overlapping patches')
 parser.add_argument("--n_epochs", type=int, default=1,
                     help="Number of epochs")
 
@@ -86,8 +88,10 @@ parser.add_argument("--criteria", type=float, default=0.5,
                     help="Threshold on reassigning the transcript")
 
 # Model saving 
-parser.add_argument("--path", type=str, default="./misc.pt",
-                    help="The path at which the saved model should be. It should end with .pt")
+parser.add_argument("--dir_name", type=str, default=".",
+                    help="The directory path at which the saved model should be.")
+parser.add_argument("--model_name", type=str, default="misc",
+                    help="The model name")
 
 # Maybe consider
 # config.yaml
@@ -109,10 +113,11 @@ def main(cmdargs: argparse.Namespace):
     leiden_res = cmdargs.leiden_res 
     preprocess = not cmdargs.no_preprocess
     max_centroid_dist = cmdargs.max_centroid_dist
-    min_centroid_dist = cmdargs.min_centroid_dist
     mask_dist_cutoff = cmdargs.mask_dist_cutoff
     num_rep = cmdargs.num_rep
     method = cmdargs.method
+    prior_50_reassign_prob = cmdargs.prior_50_reassign_prob
+    prior_5_reassign_prob = cmdargs.prior_5_reassign_prob
     reparametrize = cmdargs.reparametrize
     
     
@@ -126,10 +131,11 @@ def main(cmdargs: argparse.Namespace):
              leiden_res=leiden_res,
              preprocess=preprocess,
              max_centroid_dist=max_centroid_dist,
-             min_centroid_dist=min_centroid_dist,
              mask_dist_cutoff=mask_dist_cutoff,
              num_rep=num_rep,
              method=method,
+             prior_50_reassign_prob=prior_50_reassign_prob,
+             prior_5_reassign_prob=prior_5_reassign_prob,
              reparametrize=reparametrize)
     
     cell_metadata = cmdargs.cell_metadata
@@ -142,13 +148,12 @@ def main(cmdargs: argparse.Namespace):
                   detected_transcripts=detected_transcripts,
                   cell_by_gene_counts=cell_by_gene_counts)
     
-    m.patchfy_data()
+    percent_cell_per_patch = cmdargs.percent_cell_per_patch
+    num_overlap = cmdargs.num_overlap
+    m.patchfy_data(percent_cell_per_patch=percent_cell_per_patch,
+                   num_overlap=num_overlap)
     
-    prior_50_reassign_prob = cmdargs.prior_50_reassign_prob
-    prior_5_reassign_prob = cmdargs.prior_5_reassign_prob
-    
-    m.initialize_parameters(prior_50_reassign_prob=prior_50_reassign_prob,
-                            prior_5_reassign_prob=prior_5_reassign_prob)
+    m.initialize_parameters()
     
     n_epochs = cmdargs.n_epochs
     
@@ -157,14 +162,16 @@ def main(cmdargs: argparse.Namespace):
     
     criteria = {"threshold": cmdargs.criteria}
     m.trial_reassign_tx(criteria=criteria)
-    m.final_reassign_tx(selected_criterion="threshold")
+    # m.final_reassign_tx(selected_criterion="threshold")
     
     # reclustering
     # In cli, only argmax will be used 
     m.recluster() 
     
     # saving model 
-    m.save_model(path=cmdargs.path)
+    m.save_model(dir_name=cmdargs.dir_name,
+                 model_name=cmdargs.model_name,
+                 save_reassigning_result=True)
     sys.exit(0)
 
 
