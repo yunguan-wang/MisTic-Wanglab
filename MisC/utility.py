@@ -196,6 +196,7 @@ def import_data(cell_metadata: Union[str, pd.DataFrame],
                                     geometry=gpd.points_from_xy(adata.obs['x'], adata.obs['y']))
         adata.obs.rename_geometry("cell_centroid_geom", inplace=True)
         adata.var['col_index'] = [i for i in range(adata.var.shape[0])]
+        adata.var['gene'] = adata.var_names
         # As we will alter the counts later on, we will save a copy of the 
         # original count in one of the layers 
         adata.layers['counts_0'] = adata.X.copy()
