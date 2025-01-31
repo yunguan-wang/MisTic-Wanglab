@@ -162,7 +162,7 @@ def main(cmdargs: argparse.Namespace):
     
     criteria = {"threshold": cmdargs.criteria}
     m.trial_reassign_tx(criteria=criteria)
-    m.final_reassign_tx(selected_criterion="threshold")
+    # m.final_reassign_tx(selected_criterion="threshold")
     
     # reclustering
     # In cli, only argmax will be used 
@@ -170,7 +170,8 @@ def main(cmdargs: argparse.Namespace):
     
     # saving model 
     m.save_model(dir_name=cmdargs.dir_name,
-                 model_name=cmdargs.model_name)
+                 model_name=cmdargs.model_name,
+                 save_reassigning_result=True)
     sys.exit(0)
 
 

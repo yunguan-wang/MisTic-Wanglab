@@ -595,7 +595,8 @@ class misc(nn.Module):
         
     def save_model(self,
                    dir_name: str,
-                   model_name: str) -> None:
+                   model_name: str,
+                   save_reassigning_result: bool=False) -> None:
         """Save the model
 
         Parameters
@@ -616,13 +617,15 @@ class misc(nn.Module):
                       'n_leiden': self.n_leiden,
                       'prior_50_reassign_prob': self.prior_50_reassign_prob,
                       'prior_5_reassign_prob': self.prior_5_reassign_prob,
-                      'reparametrize': self.reparametrize}
+                      'reparametrize': self.reparametrize,
+                      "save_reassigning_result": save_reassigning_result}
         
         with open(os.path.join(dir_name, model_name+"_meta.json"), "w") as f:
             json.dump(model_meta, f, cls=JSONEncoder)
             
-        with open(os.path.join(dir_name, model_name+"_tx_to_reassign_dict.json"), "w") as f:
-            json.dump(self.tx_to_reassign_dict, f, cls=JSONEncoder)
+        if save_reassigning_result:
+            with open(os.path.join(dir_name, model_name+"_tx_to_reassign_dict.json"), "w") as f:
+                json.dump(self.tx_to_reassign_dict, f, cls=JSONEncoder)
         
     def load_model(self,
                    dir_name: str,
@@ -645,9 +648,12 @@ class misc(nn.Module):
         self.prior_50_reassign_prob = model_meta['prior_50_reassign_prob']
         self.prior_5_reassign_prob = model_meta['prior_5_reassign_prob']
         self.reparametrize = model_meta['reparametrize']
-        self.tx_to_reassign_dict = json.load(open(os.path.join(dir_name, model_name+"_tx_to_reassign_dict.json")))
-        for k in self.tx_to_reassign_dict:
-            self.tx_to_reassign_dict[k] = pd.read_json(self.tx_to_reassign_dict[k])
+        
+        save_reassigning_result = model_meta['save_reassigning_result']
+        if save_reassigning_result:
+            self.tx_to_reassign_dict = json.load(open(os.path.join(dir_name, model_name+"_tx_to_reassign_dict.json")))
+            for k in self.tx_to_reassign_dict:
+                self.tx_to_reassign_dict[k] = pd.read_json(self.tx_to_reassign_dict[k])
         
         
         self.initialize_parameters()
