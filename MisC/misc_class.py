@@ -84,6 +84,8 @@ class misc(nn.Module):
         """
         super().__init__()
         
+        assert method in ['split', 'bootstrap'], "method has to be either split or bootstrap"
+        
         # Record parameters 
         self.import_data_par = {
             'cell_centroid_x_col': cell_centroid_x_col,
