@@ -41,7 +41,6 @@ def expression_feature(adata: sc.AnnData,
     Tuple[pd.DataFrame, pd.DataFrame]
         Differential analysis results 
     """
-    assert method in ['split', 'bootstrap'], "method has to be either split or bootstrap"
     n_cpus = get_num_processes(n_cpus=None)
     # To prepare for one-vs-rest comparison, we first construct an augmented dataframe 
     # where the trailing samples are just the original counts that belong to 
