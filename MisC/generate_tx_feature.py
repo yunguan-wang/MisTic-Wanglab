@@ -22,7 +22,8 @@ from typing import Tuple
 def expression_feature(adata: sc.AnnData,
                         layer: str,
                         num_rep: int=3,
-                        method: str="split") -> Tuple[pl.DataFrame, pl.DataFrame]:
+                        method: str="split",
+                        seed: int=42) -> Tuple[pl.DataFrame, pl.DataFrame]:
     """Use deseq2 with pseudo bulks to perform differential analysis among different cell types and cell type vs all other cell types 
 
     Parameters
@@ -42,6 +43,7 @@ def expression_feature(adata: sc.AnnData,
         Differential analysis results 
     """
     n_cpus = get_num_processes(n_cpus=None)
+    np.random.seed(seed)
     # To prepare for one-vs-rest comparison, we first construct an augmented dataframe 
     # where the trailing samples are just the original counts that belong to 
     # all the cells except for one type 
@@ -335,7 +337,8 @@ def generate_feature(adata: sc.AnnData,
                     mask_distance: pd.DataFrame, 
                     mask_dist_cutoff: float=1,
                     num_rep: int=3,
-                    method: str="split") -> pl.DataFrame:
+                    method: str="split",
+                    seed: int=42) -> pl.DataFrame:
     """A wrap up function for expression_feature and distance_feature 
 
     Parameters
@@ -371,7 +374,8 @@ def generate_feature(adata: sc.AnnData,
     exp_1v1_df, exp_1vR_df = expression_feature(adata=adata,
                                                 layer=layer,
                                                 num_rep=num_rep,
-                                                method=method)
+                                                method=method,
+                                                seed=seed)
     # Combine the two piceces of information 
     intf_tx = intf_tx.join(exp_1v1_df, how='left', 
                             on=['cell_type', "neighbor_celltype", "gene"])

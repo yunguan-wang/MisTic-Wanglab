@@ -77,10 +77,12 @@ Also make sure the numpy version is < `2.0` and pydeseq2 is >=`0.4.6` and <`0.5`
 ### Interactive Python 
 This assumes that you are using Jupyter notebook to run MisC.
 
+1. Instantiate the object and import data
 ```python
 >>> from MisC.misc_class import misc
 >>> # Check and specify the column names!
->>> m = misc("MAKE/SURE/TO/CHECK/COLUMN/NAMES!!!")
+>>> m = misc("MAKE/SURE/TO/CHECK/COLUMN/NAMES!!!",
+            model_device="cpu")
 >>> # cell_by_gene_counts is optional
 >>> cell_by_gene_counts = "PATH/TO/COUNTS"
 >>> detected_transcripts = 'PATH/TO/TX'
@@ -90,35 +92,48 @@ This assumes that you are using Jupyter notebook to run MisC.
                     cell_metadata=cell_metadata,
                     cell_boundary_polygons=cell_boundary_polygons,
                     detected_transcripts=detected_transcripts)
+```
+
+This will not only import the data into the `misc` object, but also perform data curation and generate features necessary for model training and transcript reassignment. 
+
+Note that the function will create a `molecule_id` column for the `detected_transcripts` file. The first record will be `tx_0`, the second will be `tx_1`, etc..
+
+2. Model training
+
+```python
+>>> # Generate minibatches for SGD
 >>> m.patchfy_data()
 >>> m.initialize_parameters()
 >>> m.training_loop(n_epochs=5)
+```
+
+3. Transcript reassignment
+
+We allow users to specify various criteria/cutoff for reassigning transcripts. The default is 0.5. 
+
+```python
+>>> m.compute_reassign_probs()
 >>> m.trial_reassign_tx(criteria={"threshold": 0.5})
 >>> m.save_model(dir_name="PATH/TO/DIRECTORY",
                     model_name="misc",
-                    save_reassigning_result=True)
+                    save_reassigning_result=True,
+                    selected_criterion="threshold")
 ```
 
-This will save PyTorch model `misc.pt` along with some meta information `misc_meta.json`. In addition, by specifying `save_reassigning_result=True`, the transcripts that will be reassigned according to the specified `threshold` will be save as `misc_tx_to_reassign_dict.json`. 
+This will save PyTorch model `misc.pt` along with some meta information `misc_meta.json`. In addition, by specifying `save_reassigning_result=True` along with the `selected_criterion` the transcripts that will be reassigned according to the specified `threshold` will be save as `misc_tx_to_reassign.parquet`. 
 
-This `.json` file contains potentially multiple dataframes each corresponding to one of the criteria. Each dataframe will have three columns `molecule_id`, `cell_id`, and `neighbor_cell_id`. To actually reassign those transcripts, you can run 
+This `.parquet` file contains a dataframe with four columns `molecule_id`, `original_cell_id`, `reassigned_cell_id`, and `gene`. 
 
-```shell
->>> m.final_reassign_tx(selected_criterion='threshold')
+The ids contained in the `molecule_id` column correspond to the row numbers of the original `detected_transcripts` file. Therefore, `tx_0` corresponds to the first record in the `detected_transcripts` file.
+
+If you are also interested in the computed reassigning probabilities, you can assess them via 
+
+```python
+>>> m.intf_tx
 ```
 
-or if you do not want to work with the object
+We do not provide a function to save this polars dataframe as it could be large. However, recomputing it would not take too long. 
 
-```shell
->>> from MisC.utility import make_reassignment_tx_metadata, JSONEncoder
->>> # Read in your detected transcripts and curated it
->>> tx_to_reassign_dict = json.load(open("PATH/TO/DICT"))
->>> for k in tx_to_reassign_dict:
-        tx_to_reassign_dict[k] = pd.read_json(tx_to_reassign_dict[k])
->>> updated_tx_meta = make_reassignment_tx_metadata(
-                tx_to_reassign=tx_to_reassign["CRITERION_YOU_WANG"],
-                tx_metadata=tx_metadata)
-```
 
 ### Command-Line Interface (CLI)
 
