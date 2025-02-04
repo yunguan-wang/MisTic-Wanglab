@@ -81,7 +81,8 @@ This assumes that you are using Jupyter notebook to run MisC.
 ```python
 >>> from MisC.misc_class import misc
 >>> # Check and specify the column names!
->>> m = misc("MAKE/SURE/TO/CHECK/COLUMN/NAMES!!!")
+>>> m = misc("MAKE/SURE/TO/CHECK/COLUMN/NAMES!!!",
+            model_device="cpu")
 >>> # cell_by_gene_counts is optional
 >>> cell_by_gene_counts = "PATH/TO/COUNTS"
 >>> detected_transcripts = 'PATH/TO/TX'

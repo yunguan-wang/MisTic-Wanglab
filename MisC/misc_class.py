@@ -47,7 +47,8 @@ class misc(nn.Module):
                 prior_50_reassign_prob: float=0.01,
                 prior_5_reassign_prob: float=0.5,
                 reparametrize: bool=False,
-                seed: int=42) -> None:
+                seed: int=42,
+                model_device: Optional[Union[str, torch.device]] = None) -> None:
         """Instantiate a misc object 
 
         Parameters
@@ -127,7 +128,14 @@ class misc(nn.Module):
         self.log_interval = 10
         
         # Create parameters 
-        self.model_device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        # Set model device
+        if model_device is None:
+            self.model_device = torch.device(
+                'cuda' if torch.cuda.is_available() else 'cpu')
+        elif isinstance(model_device, str):
+            self.model_device = torch.device(model_device)
+        else:
+            self.model_device = model_device
         self.n_genes = None
         self.n_leiden = None
         self.prior_50_reassign_prob = prior_50_reassign_prob
