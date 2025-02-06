@@ -141,7 +141,9 @@ def import_data(cell_metadata: Union[str, pd.DataFrame],
             cell_coords.rename_geometry("cell_boundary_geom", inplace=True)
         # Remove potential duplicated vertices in a polygon
         cell_coords['cell_boundary_geom'] = cell_coords['cell_boundary_geom'].remove_repeated_points(tolerance=0.0)
-
+        # Sanity check 
+        assert set(cell_coords.index) == set(cell_meta.index), "Cell populations in cell boundaries and cell metadata are different."
+    
     # Transcript information 
     with process_time_ram("Processing Transcript information ") as ctm:
         # We also convert the pandas dataframe to geopandas geodataframe 
@@ -169,6 +171,8 @@ def import_data(cell_metadata: Union[str, pd.DataFrame],
                 gene_col: 'gene',
                 cell_col: 'cell_id'
                 }, inplace=True, errors='raise')
+        # Sanity check 
+        assert set(tx_metadata['cell_id']) == set(cell_meta.index), "Cell populations in transcript metadata and cell metadata are different."
         
     # Cell by gene counts matrix 
     with process_time_ram("Processing cell by gene matrix") as ctm:
@@ -185,6 +189,10 @@ def import_data(cell_metadata: Union[str, pd.DataFrame],
             counts = pd.pivot(counts, values='molecule_id', columns="gene", index='cell_id').fillna(0)
             
         counts.index.rename(name='cell_id', inplace=True)
+        # Sanity check 
+        assert set(counts.index) == set(cell_meta.index), "Cell populations in cell-by-gene counts and cell metadata are different."
+        assert set(counts.columns) == set(tx_metadata['gene']), "Genes in cell-by-gene counts and transcript metadata are different."
+        
 
     # Create AnnData object to store the counts 
     # and facilitate future processing 

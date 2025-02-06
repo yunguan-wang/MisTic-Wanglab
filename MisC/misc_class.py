@@ -9,7 +9,7 @@ import polars as pl
 # Data manipulation 
 import numpy as np
 from scipy.special import softmax
-from scipy.stats import entropy
+from scipy.stats import entropy, ks_2samp
 import torch 
 import torch.nn as nn 
 from torch import optim
@@ -145,7 +145,9 @@ class misc(nn.Module):
         self.prior_reassign_coefficients = None
         self.cell_type_coefficients = None 
         self.optimizer = None
-        
+        # For training 
+        self.CEl_list = []
+        self.KLD_list = []
         
     def import_data(self,
                     cell_metadata: Union[str, pd.DataFrame],
@@ -353,8 +355,7 @@ class misc(nn.Module):
                       cell_type_logits: torch.tensor, 
                       cell_type_labels: torch.tensor,
                       reassign_probs: torch.tensor,
-                      prior_reassign_probs: torch.tensor, 
-                      verbose: bool=False) -> torch.tensor:
+                      prior_reassign_probs: torch.tensor) -> torch.tensor:
         """The loss function 
 
         Parameters
@@ -367,8 +368,6 @@ class misc(nn.Module):
             Posterior reassignment probabilities
         prior_reassign_probs : torch.tensor
             Prior reassignment probabilities
-        verbose : bool, optional
-            Whether or not to show the details of the loss , by default False
 
         Returns
         -------
@@ -383,24 +382,17 @@ class misc(nn.Module):
         log_ratio_0 = torch.log((1-reassign_probs)/(1-prior_reassign_probs)+1e-20)
         KLD_reassign = torch.sum(reassign_probs * log_ratio_1 + (1-reassign_probs) * log_ratio_0, dim=-1).mean()
         
-        if verbose:
-            print("="*30)
-            print("The cross entropy loss is {} and KLD_reassign is {}".format(CEl.detach().cpu().numpy(), 
-                                                                      KLD_reassign.detach().cpu().numpy()))
-            print("="*30) 
-        return CEl + KLD_reassign
+        return CEl + KLD_reassign, CEl.detach().cpu().numpy().item(), KLD_reassign.detach().cpu().numpy().item()
     
     def training_loop(self,
                       n_epochs: int,
-                      verbose: bool=False) -> None:
+                      early_stop_pval: float=0.5) -> None:
         """The training loop 
 
         Parameters
         ----------
         n_epochs : int
             Number of epochs 
-        verbose : bool, optional
-             Whether or not to show the details of the loss , by default False
         """
         # Preconstruct the information to save time 
         adata_w_leiden_xy = self.adata.to_df(self.current_layer).merge(self.adata.obs[['leiden','x','y']],
@@ -412,9 +404,20 @@ class misc(nn.Module):
         
         self.train()
         for epoch in range(n_epochs):
+            if epoch >= 2:
+                cel_previous_2 = np.array(self.CEl_list[epoch-2])
+                cel_previous_1 = np.array(self.CEl_list[epoch-1])
+                p_val = ks_2samp(cel_previous_2, cel_previous_1).pvalue
+                if p_val > early_stop_pval:
+                    print("="*30)
+                    print("No improvement in the classification task detected. Stop early at epoch {}".format(epoch-1))
+                    print("="*30)
+                    break
             np.random.shuffle(self.coord_list)
             self.current_temperature = self.init_temperature
             train_loss = 0.0
+            CEl_epoch_list = []
+            KLD_epoch_list = []
             for minibatch_ind, coord in tqdm(enumerate(self.coord_list),
                                              total=len(self.coord_list)):
                 # Load data 
@@ -433,12 +436,13 @@ class misc(nn.Module):
                                                                             temperature=self.current_temperature)
                 # Loss and gradient 
                 self.optimizer.zero_grad()
-                loss = self.loss_function(cell_type_logits=cell_type_logits,
-                                          cell_type_labels=cell_type_labels,
-                                          reassign_probs=reassign_probs,
-                                          prior_reassign_probs=prior_reassign_probs,
-                                          verbose=verbose)
+                loss, CEl, KLD = self.loss_function(cell_type_logits=cell_type_logits,
+                                                cell_type_labels=cell_type_labels,
+                                                reassign_probs=reassign_probs,
+                                                prior_reassign_probs=prior_reassign_probs)
                 loss.backward()
+                CEl_epoch_list.append(CEl)
+                KLD_epoch_list.append(KLD)
                 train_loss += loss.item()
                 self.optimizer.step()
                 # We gradually decrease the temperature so that the posterior would approach a bernoulli 
@@ -450,6 +454,8 @@ class misc(nn.Module):
                             epoch, minibatch_ind, len(self.coord_list),
                                 100. * minibatch_ind / len(self.coord_list),
                                 loss.item()))
+            self.CEl_list.append(CEl_epoch_list)
+            self.KLD_list.append(KLD_epoch_list)
             print('====> Epoch: {} Average loss: {:.4f}'.format(
                     epoch, train_loss / len(self.coord_list)))
 

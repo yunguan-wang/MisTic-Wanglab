@@ -157,8 +157,7 @@ def main(cmdargs: argparse.Namespace):
     
     n_epochs = cmdargs.n_epochs
     
-    m.training_loop(n_epochs=n_epochs,
-                    verbose=False)
+    m.training_loop(n_epochs=n_epochs)
     m.compute_reassign_probs()
     
     criteria = {"threshold": cmdargs.criteria}
