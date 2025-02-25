@@ -129,6 +129,8 @@ class misc(nn.Module):
             self.model_device = model_device
         self.n_genes = None
         self.n_leiden = None
+        self.alpha = None
+        self.gamma = None
         self.prior_50_reassign_prob = prior_50_reassign_prob
         self.prior_5_reassign_prob = prior_5_reassign_prob
         self.reparametrize = reparametrize
@@ -179,6 +181,15 @@ class misc(nn.Module):
                                                                       **self.import_data_par)
         self.n_genes = self.adata.uns['n_genes']
         self.n_leiden = self.adata.uns['n_leiden']
+        class_fraction = self.adata.obs['leiden'].value_counts(normalize=True).sort_index().values
+        if np.max(class_fraction)/np.min(class_fraction) > 10:
+            self.alpha = 1/np.sqrt(class_fraction)
+            self.alpha = self.alpha/np.sum(self.alpha)
+            self.alpha = torch.tensor(self.alpha, dtype=torch.float32, device=self.model_device)
+            self.gamma = 1
+        else:
+            self.alpha = torch.ones(class_fraction.shape)
+            self.gamma = 0
         print("Computing mask distances... Keep in mind, patience is a virtue...")
         self.mask_distance = calculate_mask_distance(adata=self.adata,
                                                       cell_coords=self.cell_coords,
@@ -208,6 +219,13 @@ class misc(nn.Module):
                                                                 intf_tx=self.intf_tx_dict[intf_tx_name],
                                                                 percent_cell_per_patch=percent_cell_per_patch,
                                                                 num_overlap=num_overlap) 
+            if len(self.coord_list[intf_tx_name]) == 0:
+                self.generate_feature_par['nearest'] -= 1
+                del self.intf_tx_dict[intf_tx_name]
+                del self.coord_list[intf_tx_name]
+                del self.optimizer[intf_tx_name]
+                del self.CEl_list[intf_tx_name]
+                del self.KLD_list[intf_tx_name]
     
     def initialize_parameters(self) -> None:
         """Initialize model parameters 
@@ -378,8 +396,12 @@ class misc(nn.Module):
             The loss 
         """
         # Cross entropy loss (despite its name it's a loss)
-        CEl = F.cross_entropy(cell_type_logits,
-                              cell_type_labels, reduction='mean') 
+        CE_loss = F.cross_entropy(cell_type_logits,
+                                cell_type_labels, 
+                                reduction='none')
+        pt = torch.exp(-CE_loss)
+        at = self.alpha.gather(0, cell_type_labels.view(-1))
+        CEl = (at * (1-pt)**self.gamma * CE_loss).mean() 
         # KL divergence 
         log_ratio_1 = torch.log(reassign_probs/prior_reassign_probs+1e-20)
         log_ratio_0 = torch.log((1-reassign_probs)/(1-prior_reassign_probs)+1e-20)
@@ -389,7 +411,7 @@ class misc(nn.Module):
     
     def training_loop(self,
                       n_epochs: int,
-                      early_stop_pval: float=0.1) -> None:
+                      early_stop_pval: float=0.5) -> None:
         """The training loop 
 
         Parameters
@@ -417,13 +439,14 @@ class misc(nn.Module):
                         print("No improvement in the classification task detected. Stop early at epoch {}".format(epoch-1))
                         print("="*30)
                         break
-                np.random.shuffle(self.coord_list)
+                np.random.shuffle(self.coord_list[intf_tx_name])
                 self.current_temperature = self.init_temperature
                 train_loss = 0.0
                 CEl_epoch_list = []
                 KLD_epoch_list = []
                 for minibatch_ind, coord in tqdm(enumerate(self.coord_list[intf_tx_name]),
-                                                total=len(self.coord_list[intf_tx_name])):
+                                                total=len(self.coord_list[intf_tx_name]),
+                                                desc=intf_tx_name):
                     # Load data 
                     cell_by_gene_counts, tx_features, tx_prior_features, cell_type_labels, row_index_self, row_index_neighbor, col_index = load_patch(adata_w_leiden_xy=adata_w_leiden_xy,
                                                                                                                                                     adata_var=adata_var,
@@ -456,13 +479,13 @@ class misc(nn.Module):
                     # Print training information 
                     if minibatch_ind % self.log_interval == 0:
                         print('Train Epoch: {} [{}/{} ({:.0f}%)]tLoss: {:.6f}'.format(
-                                epoch, minibatch_ind, len(self.coord_list),
-                                    100. * minibatch_ind / len(self.coord_list),
+                                epoch, minibatch_ind, len(self.coord_list[intf_tx_name]),
+                                    100. * minibatch_ind / len(self.coord_list[intf_tx_name]),
                                     loss.item()))
                 self.CEl_list[intf_tx_name].append(CEl_epoch_list)
                 self.KLD_list[intf_tx_name].append(KLD_epoch_list)
                 print('====> Epoch: {} Average loss: {:.4f}'.format(
-                        epoch, train_loss / len(self.coord_list)))
+                        epoch, train_loss / len(self.coord_list[intf_tx_name])))
 
     def compute_reassign_probs(self) -> None:
         """Compute reassignment probabilities
@@ -505,10 +528,10 @@ class misc(nn.Module):
         self.intf_tx = self.intf_tx.with_columns(pl.concat_list(prob_cols).list.arg_max().alias("max_index"))
         self.intf_tx = self.intf_tx.with_columns(pl.concat_list(neighbor_cols).list.get(pl.col("max_index")).alias("neighbor_cell_id"))
         self.intf_tx = self.intf_tx.with_columns(pl.concat_list(prob_cols).list.get(pl.col("max_index")).alias("reassign_probs"))
-        self.intf_tx = self.intf_tx.drop(neighbor_cols+prob_cols+['max_index'])
+        self.intf_tx = self.intf_tx.drop(neighbor_cols+prob_cols)
         
-    def trial_reassign_tx(self,
-                          criteria: dict={"threshold": 0.5}) -> None:
+    def reassign_tx(self,
+                    criteria: dict={"threshold": 0.5}) -> None:
         """Generate transcript reassignment based on various criteria 
 
         Parameters
@@ -524,7 +547,7 @@ class misc(nn.Module):
                 reassign = (self.intf_tx['reassign_probs']>criterion).to_numpy().astype(int)
             
             self.intf_tx = self.intf_tx.with_columns(pl.Series(name='reassign', values=reassign))
-            tx_to_reassign = self.intf_tx.filter(pl.col("reassign")==1).select(['molecule_id', 'cell_id', 'neighbor_cell_id', "gene"]).to_pandas()
+            tx_to_reassign = self.intf_tx.filter(pl.col("reassign")==1).drop("reassign").to_pandas()
             
             self.intf_tx = self.intf_tx.drop(['reassign'])
             trial_layer = self.current_layer+"_"+criterion_name
@@ -534,10 +557,10 @@ class misc(nn.Module):
             # We do not actually reassign transcript at this stage 
             self.tx_to_reassign_dict[trial_layer] = tx_to_reassign.copy()
             self.adata = make_reassignment_adata(adata=self.adata,
-                                                    layer=self.current_layer,
-                                                    tx_to_reassign=tx_to_reassign,
-                                                    trial_layer=trial_layer,
-                                                    preprocess=self.import_data_par['preprocess'])
+                                                layer=self.current_layer,
+                                                tx_to_reassign=tx_to_reassign,
+                                                trial_layer=trial_layer,
+                                                preprocess=self.import_data_par['preprocess'])
         
     def save_model(self,
                    dir_name: str,
@@ -555,7 +578,7 @@ class misc(nn.Module):
         if save_reassigning_result:
             assert selected_criterion in self.tx_to_reassign_dict, "selected_criterion not found in tx_to_reassign_dict"
         
-        torch.save({'model_state_dict': self.state_dict()} | 
+        torch.save({'model_state_dict': self.state_dict()} | \
             {'optimizer_state_dict_{}'.format(intf_tx_name): self.optimizer[intf_tx_name].state_dict() for intf_tx_name in self.intf_tx_dict}, 
             os.path.join(dir_name, model_name+".pt"))
         
@@ -622,7 +645,9 @@ class misc(nn.Module):
         self.initialize_parameters()
         checkpoint = torch.load(os.path.join(dir_name, model_name+".pt")) 
         self.load_state_dict(checkpoint['model_state_dict'])
-        self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        for i in range(self.generate_feature_par['nearest']):
+            intf_tx_name = "intf_tx{}".format(i)
+            self.optimizer[intf_tx_name].load_state_dict(checkpoint['optimizer_state_dict_{}'.format(intf_tx_name)])
         
         
             

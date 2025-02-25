@@ -222,8 +222,7 @@ def distance_feature(adata: sc.AnnData,
     with process_time_ram("Add neighbor index") as ctm:
         all_intf_tx = all_intf_tx.sort("molecule_id", "neighbor_distance").with_columns(pl.int_range(pl.len()).over("molecule_id"))
         all_intf_tx = all_intf_tx.rename({'literal': "neighbor_index"})
-        for n_nearest in range(nearest):
-            intf_tx_dict = {"intf_tx{}".format(i): all_intf_tx.filter(pl.col("neighbor_index")>=i) for i in range(n_nearest)}
+        intf_tx_dict = {"intf_tx{}".format(i): all_intf_tx.filter(pl.col("neighbor_index")>=i) for i in range(nearest)}
     ########################################################
     ########################################################
     for intf_tx_name, intf_tx in intf_tx_dict.items():
@@ -340,28 +339,29 @@ def generate_feature(adata: sc.AnnData,
     exp_1vR_df, prior_exp_1vR_df = expression_feature(adata=adata,
                                                     layer=layer,
                                                     seed=seed)
-    # Combine the two piceces of information 
-    for intf_tx_name, intf_tx in intf_tx_dict.items():
-        intf_tx = intf_tx.join(exp_1vR_df, how='left',
-                                on=['cell_type', "gene"])
-        intf_tx = intf_tx.join(prior_exp_1vR_df, how='left',
-                            on=['cell_id', "gene"])
-        
-        intf_tx = intf_tx.join(exp_1vR_df.rename({"cell_type":"neighbor_celltype",
-                                "rest_self_exp_feature":"neighbor_rest_self_exp_feature"}), how='left',
-                                on=['neighbor_celltype', "gene"])
-        intf_tx = intf_tx.with_columns(pl.col("neighbor_rest_self_exp_feature").neg())
-        
-        intf_tx = intf_tx.join(prior_exp_1vR_df.rename({"prior_rest_self_exp_feature": "neighbor_prior_rest_self_exp_feature",
-                            "cell_id": "neighbor_cell_id"}), how='left',
-                            on=['neighbor_cell_id', "gene"])
-        intf_tx = intf_tx.with_columns(pl.col("neighbor_prior_rest_self_exp_feature").neg())
-        
-        intf_tx = intf_tx.rename({"neighbor_rest_self_exp_feature": "neighbor_exp_feature",
-                                "neighbor_prior_rest_self_exp_feature": "neighbor_prior_exp_feature",
-                                "rest_self_exp_feature": "exp_feature",
-                                "prior_rest_self_exp_feature": "prior_exp_feature"})
-        intf_tx_dict[intf_tx_name] = intf_tx
+    with process_time_ram("Combine features") as ctm:
+        # Combine the two piceces of information 
+        for intf_tx_name, intf_tx in intf_tx_dict.items():
+            intf_tx = intf_tx.join(exp_1vR_df, how='left',
+                                    on=['cell_type', "gene"])
+            intf_tx = intf_tx.join(prior_exp_1vR_df, how='left',
+                                on=['cell_id', "gene"])
+            
+            intf_tx = intf_tx.join(exp_1vR_df.rename({"cell_type":"neighbor_celltype",
+                                    "rest_self_exp_feature":"neighbor_rest_self_exp_feature"}), how='left',
+                                    on=['neighbor_celltype', "gene"])
+            intf_tx = intf_tx.with_columns(pl.col("neighbor_rest_self_exp_feature").neg())
+            
+            intf_tx = intf_tx.join(prior_exp_1vR_df.rename({"prior_rest_self_exp_feature": "neighbor_prior_rest_self_exp_feature",
+                                "cell_id": "neighbor_cell_id"}), how='left',
+                                on=['neighbor_cell_id', "gene"])
+            intf_tx = intf_tx.with_columns(pl.col("neighbor_prior_rest_self_exp_feature").neg())
+            
+            intf_tx = intf_tx.rename({"neighbor_rest_self_exp_feature": "neighbor_exp_feature",
+                                    "neighbor_prior_rest_self_exp_feature": "neighbor_prior_exp_feature",
+                                    "rest_self_exp_feature": "exp_feature",
+                                    "prior_rest_self_exp_feature": "prior_exp_feature"})
+            intf_tx_dict[intf_tx_name] = intf_tx
     
     return intf_tx_dict
     
