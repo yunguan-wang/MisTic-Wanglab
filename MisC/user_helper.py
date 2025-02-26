@@ -83,3 +83,97 @@
 #         GeoDataFrame(
 #             cell_masks[['polygon']],geometry='polygon'
 #             ).to_parquet('cell_polygons.parquet', index=True)
+# def final_reassign_tx(self,
+#                         selected_criterion: str) -> None:
+#     """Make final transcript reassignment 
+
+#     Parameters
+#     ----------
+#     selected_criterion : str
+#         The criterion name 
+#     """
+#     tx_to_reassign = self.tx_to_reassign_dict[self.current_layer+"_"+selected_criterion].copy()
+#     self.adata = make_reassignment_adata(adata=self.adata, 
+#                                             layer=self.current_layer,
+#                                             tx_to_reassign=tx_to_reassign,
+#                                             preprocess=self.import_data_par['preprocess'])
+#     self.tx_metadata = make_reassignment_tx_metadata(tx_to_reassign=tx_to_reassign,
+#                                                         tx_metadata=self.tx_metadata)
+#     # Move the current layer one step further 
+#     layer_num = extract_layer_num(self.current_layer)
+#     self.current_layer = "counts_"+str(int(layer_num+1))
+#     self.adata.uns['current_layer'] = self.current_layer
+
+# def recluster(self,
+#                 temperature: float=0.0,
+#                 top_k: Optional[int]=None,
+#                 new_layer: Optional[str]=None) -> None:
+#     """Regenerate the clusters 
+
+#     Parameters
+#     ----------
+#     temperature : float, optional
+#         Temperature in sampling multinomial, by default 0.0
+#     top_k : Optional[int], optional
+#         Only the top k candidates will be sampled, by default None
+#     new_layer : Optional[str], optional
+#         Layer upon which the logits will be computed, by default None
+#     """
+#     if new_layer is None:
+#         new_layer = self.current_layer
+#     self.eval()
+#     with torch.no_grad():
+#         cell_by_gene_counts_chunks = even_split(array=self.adata.layers[new_layer],
+#                                                 chunk_size=1000)
+#         logits = torch.empty((0, self.adata.uns["n_leiden"]), dtype=torch.float32)
+#         cell_type_predict = torch.empty((0, 1), dtype=torch.int64)
+#         for cell_by_gene_counts_chunk in cell_by_gene_counts_chunks:
+#             logits_chunk = self.cell_type_coefficients(torch.tensor(cell_by_gene_counts_chunk,
+#                                                             dtype=torch.float32, 
+#                                                             device=self.model_device)).cpu()
+#             logits = torch.cat((logits, logits_chunk), dim=0)
+#             # For top k, the -inf mask trick is used 
+#             if top_k is not None:
+#                 top_logits, _ = torch.topk(logits_chunk, top_k)
+#                 min_val = top_logits[:, -1]
+#                 logits_chunk = torch.where(
+#                     logits_chunk < min_val,
+#                     torch.tensor(float('-inf')).to(logits.device),
+#                     logits_chunk
+#                 )
+#             # If temperature is not 0, we sample from multinomial 
+#             if temperature > 0.0:
+#                 logits_chunk = logits_chunk/temperature
+#                 probs = torch.softmax(logits_chunk, dim=-1)
+#                 cell_type_predict_chunk = torch.multinomial(probs, num_samples=1)
+#             else:
+#                 cell_type_predict_chunk = torch.argmax(logits_chunk, dim=-1, keepdim=True)
+#             cell_type_predict = torch.cat((cell_type_predict, cell_type_predict_chunk), dim=0)
+#     # Record the results 
+#     cell_type_predict = cell_type_predict.numpy()
+#     logits = logits.numpy()
+#     probs = softmax(logits, axis=1)
+#     # perplexity is also computed to see how uncertain the model is 
+#     perplexity = np.exp(entropy(probs, axis=1, keepdims=True))
+#     # To allow the user to recluster multiple times 
+#     # by running the recluster method multiple times 
+#     # The first time the user runs recluster, the index will be 0
+#     # after that every time the user runs recluster, the index will 
+#     # increment by 1
+#     i=0
+#     while True:
+#         new_leiden_name = new_layer + "_leiden_" + str(i)
+#         new_cell_type_name = new_layer + "_cell_type_" + str(i)
+#         if new_leiden_name not in self.adata.obs.columns:
+#             break 
+#         i += 1
+#     self.adata.obs[new_leiden_name] = cell_type_predict
+#     self.adata.obs[new_leiden_name] = self.adata.obs[new_leiden_name].astype(str)
+    
+#     temp_df = self.adata.obs[[new_leiden_name]].merge(self.adata.uns['cell_type_leiden_map'],
+#                                         how='left', left_on = new_leiden_name,
+#                                         right_on = "cell_type_index")
+#     self.adata.obs[new_cell_type_name] = temp_df['cell_type_name'].values.copy()
+    
+#     self.adata.obs[new_leiden_name+"_perplexity"] = perplexity
+#     self.adata.obs['leiden'] = self.adata.obs[new_leiden_name].copy()

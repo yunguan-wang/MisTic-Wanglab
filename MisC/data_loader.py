@@ -195,10 +195,12 @@ def load_patch(adata_w_leiden_xy: pl.DataFrame,
     
     cell_by_gene_counts = torch.tensor(cell_patch.to_numpy(), dtype=torch.float32, device=model_device)
     tx_features = torch.tensor(tx_patch[['distance_feature', 
-                                         "neighbor_self_exp_feature", 
-                                         "rest_self_exp_feature"]].to_numpy(), 
+                                         "exp_feature",
+                                         "neighbor_exp_feature"]].to_numpy(), 
                                dtype=torch.float32, device=model_device)
-    tx_prior_features = torch.tensor(tx_patch[['prior_distance_feature']].to_numpy(),
+    tx_prior_features = torch.tensor(tx_patch[['prior_distance_feature',
+                                               "prior_exp_feature",
+                                               "neighbor_prior_exp_feature"]].to_numpy(),
                                      dtype=torch.float32, device=model_device)
     row_index_self = torch.tensor(tx_patch[['row_index_self']].to_numpy(), dtype=torch.int64, device=model_device)
     row_index_neighbor = torch.tensor(tx_patch[['row_index_neighbor']].to_numpy(), dtype=torch.int64, device=model_device)

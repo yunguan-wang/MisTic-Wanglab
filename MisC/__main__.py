@@ -52,15 +52,13 @@ parser.add_argument("--no_preprocess", action="store_true",
                     help="If specified, no data processing including UMAP will be computed")
 parser.add_argument("--max_centroid_dist", type=float, default=50,
                     help="When computing mask distances, if a centroid distance is greater than this value, the mask distance will not be computed.")
-parser.add_argument("--mask_dist_cutoff", type=float, default=1,
+parser.add_argument("--mask_dist_cutoff", type=float, default=5,
                     help="The threshold of cell-cell mask distances beyond which a cell is no longer considered a neighbor")
-parser.add_argument("--num_rep", type=int, default=3,
-                    help="Number of repetitions in case of method='bootstrap' or number of chunks in case of method='split'")
-parser.add_argument("--method", type=str, default="split",
-                    help="The method to generate pseudo bulks")
+parser.add_argument("--nearest", type=int, default=1,
+                    help="Maximum number of nearest neighbors to perform reassignment")
 parser.add_argument("--prior_50_reassign_prob", type=float, default=0.01,
                     help="The prior probability of reassigning a transcript that's ranked 50% based on the distance")
-parser.add_argument("--prior_5_reassign_prob", type=float, default=0.5,
+parser.add_argument("--prior_5_reassign_prob", type=float, default=0.05,
                     help="The prior probability of reassigning a transcript that's ranked 5% based on the distance")
 parser.add_argument("--reparametrize", action="store_true",
                     help="Whether or not to force positivity on coefficients")
@@ -114,8 +112,7 @@ def main(cmdargs: argparse.Namespace):
     preprocess = not cmdargs.no_preprocess
     max_centroid_dist = cmdargs.max_centroid_dist
     mask_dist_cutoff = cmdargs.mask_dist_cutoff
-    num_rep = cmdargs.num_rep
-    method = cmdargs.method
+    nearest = cmdargs.nearest
     prior_50_reassign_prob = cmdargs.prior_50_reassign_prob
     prior_5_reassign_prob = cmdargs.prior_5_reassign_prob
     reparametrize = cmdargs.reparametrize
@@ -132,8 +129,7 @@ def main(cmdargs: argparse.Namespace):
              preprocess=preprocess,
              max_centroid_dist=max_centroid_dist,
              mask_dist_cutoff=mask_dist_cutoff,
-             num_rep=num_rep,
-             method=method,
+             nearest=nearest,
              prior_50_reassign_prob=prior_50_reassign_prob,
              prior_5_reassign_prob=prior_5_reassign_prob,
              reparametrize=reparametrize)
@@ -161,7 +157,7 @@ def main(cmdargs: argparse.Namespace):
     m.compute_reassign_probs()
     
     criteria = {"threshold": cmdargs.criteria}
-    m.trial_reassign_tx(criteria=criteria)
+    m.reassign_tx(criteria=criteria)
     
     # saving model 
     m.save_model(dir_name=cmdargs.dir_name,
