@@ -87,7 +87,8 @@ def trial_patch_coords(adata: sc.AnnData,
 def generate_patch_coords(adata: sc.AnnData,
                           intf_tx: pl.DataFrame,
                           percent_cell_per_patch: float=0.1,
-                          num_overlap: int=7) -> list:
+                          num_overlap: int=7,
+                          neighbor_index: int=0) -> list:
     """Generate patches represented by their coordinates 
 
     Parameters
@@ -105,7 +106,7 @@ def generate_patch_coords(adata: sc.AnnData,
     
     n_cells = adata.X.shape[0]
     n_genes = adata.uns['n_genes']
-    interface_cells = intf_tx['cell_id'].unique().to_list()
+    interface_cells = intf_tx.filter(pl.col('neighbor_index')==neighbor_index)['cell_id'].unique().to_list()
     # The maximum number of transcripts detected within a cell 
     max_tx = adata.layers['counts_0'].sum(axis=1).max()
     # As the model parameters are almost negligible we focus on the data 
@@ -141,7 +142,8 @@ def load_patch(adata_w_leiden_xy: pl.DataFrame,
                adata_var: pl.DataFrame,
                 intf_tx: pl.DataFrame,
                 coord_tuple: tuple,
-                model_device: torch.device) -> Tuple[torch.tensor, torch.tensor, torch.tensor, torch.tensor, torch.tensor, torch.tensor, torch.tensor]:
+                model_device: torch.device,
+                neighbor_index: int) -> Tuple[torch.tensor, torch.tensor, torch.tensor, torch.tensor, torch.tensor, torch.tensor, torch.tensor]:
     """Given a tuple of coordinates, extract the gene counts, tx features, and auxiliary information  
 
     Parameters
@@ -177,8 +179,8 @@ def load_patch(adata_w_leiden_xy: pl.DataFrame,
     cell_patch = cell_patch.with_columns(pl.Series(name="row_index", values=[i for i in range(cell_patch.shape[0])]))
     
     # Make sure all cells as well as their neighbors are within the patch 
-    
-    tx_patch = intf_tx.filter((pl.col("cell_id").is_in(cell_patch['cell_id'])) & \
+    tx_patch = intf_tx.filter(pl.col("neighbor_index") == neighbor_index)
+    tx_patch = tx_patch.filter((pl.col("cell_id").is_in(cell_patch['cell_id'])) & \
                             (pl.col("neighbor_cell_id").is_in(cell_patch['cell_id'])))
     # Generate three indices to be used for adjusting gene counts 
     tx_patch = tx_patch.join(adata_var, how='left', on='gene')
@@ -194,14 +196,15 @@ def load_patch(adata_w_leiden_xy: pl.DataFrame,
     cell_patch = cell_patch.drop(['row_index', "leiden", "x", "y", "cell_id"])
     
     cell_by_gene_counts = torch.tensor(cell_patch.to_numpy(), dtype=torch.float32, device=model_device)
-    tx_features = torch.tensor(tx_patch[['distance_feature', 
-                                         "exp_feature",
-                                         "neighbor_exp_feature"]].to_numpy(), 
+    tx_features = torch.tensor(tx_patch[['distance_feature',
+                                         'exp_feature',
+                                         'neighbor_exp_feature']].to_numpy(),
                                dtype=torch.float32, device=model_device)
     tx_prior_features = torch.tensor(tx_patch[['prior_distance_feature',
-                                               "prior_exp_feature",
-                                               "neighbor_prior_exp_feature"]].to_numpy(),
+                                               'prior_exp_feature',
+                                               'prior_neighbor_exp_feature']].to_numpy(),
                                      dtype=torch.float32, device=model_device)
+    
     row_index_self = torch.tensor(tx_patch[['row_index_self']].to_numpy(), dtype=torch.int64, device=model_device)
     row_index_neighbor = torch.tensor(tx_patch[['row_index_neighbor']].to_numpy(), dtype=torch.int64, device=model_device)
     col_index = torch.tensor(tx_patch[['col_index']].to_numpy(), dtype=torch.int64, device=model_device)

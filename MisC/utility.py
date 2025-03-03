@@ -12,7 +12,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from shapely import distance
-from scipy.spatial.distance import cdist
 from scipy.spatial import KDTree
 # Typing and other info
 from typing import Optional, Union, Tuple
@@ -411,57 +410,9 @@ def make_reassignment_adata(adata: sc.AnnData,
     return adata
 
 
-def make_reassignment_tx_metadata(tx_to_reassign: pd.DataFrame,
-                                  tx_metadata: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
-    """Make the count adjustment on the tx data alone 
-
-    Parameters
-    ----------
-    tx_to_reassign : pd.DataFrame
-        Transcripts that should be reassigned
-    tx_metadata : gpd.GeoDataFrame
-        The tx metadata 
-
-    Returns
-    -------
-    gpd.GeoDataFrame
-        The adjusted tx metadata 
-    """
-    # To perform tx reassign, we simply need to switch the cell_id with its corresponding neighbor_cell_id
-    # and update the original dataframe. We just need to make sure that the keys all match 
-    with process_time_ram("Updating transcript metadata") as ctm: 
-        tx_to_reassign.index = tx_to_reassign['molecule_id']
-        tx_to_reassign.loc[:, ['cell_id', 'neighbor_cell_id']] = tx_to_reassign.loc[:, ['neighbor_cell_id', 'cell_id']]
-        tx_metadata.update(tx_to_reassign)
-    return tx_metadata
-
-
-def reverse_reassignment_tx_metadata(tx_to_reassign: pd.DataFrame,
-                                     tx_metadata: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
-    """Reverse the adjustment 
-
-    Parameters
-    ----------
-    tx_to_reassign : pd.DataFrame
-        Transcripts that should be reassigned
-    tx_metadata : gpd.GeoDataFrame
-        The tx metadata 
-
-    Returns
-    -------
-    gpd.GeoDataFrame
-        This should be the original tx metadata 
-    """
-    # To reverse the adjustment, simply update the new tx metadata 
-    # using the reassign dataframe. 
-    tx_to_reassign.index = tx_to_reassign['molecule_id']
-    tx_metadata.update(tx_to_reassign)
-    return tx_metadata
-
-
-def sample_gumbel(shape: tuple, 
-                  model_device: torch.device,
-                  eps: float=1e-20) -> torch.tensor:
+def sample_logistic(shape: tuple, 
+                    model_device: torch.device,
+                    eps: float=1e-20):
     """Sample gumbel random variables
 
     Parameters
@@ -479,12 +430,13 @@ def sample_gumbel(shape: tuple,
         Gumbel RVs
     """
     U = torch.rand(shape).to(model_device)
-    return -torch.log(-torch.log(U + eps) + eps)
+    return torch.log(U/(1-U + eps) + eps)
 
 
 def binary_gumbel_softmax_sample(logits: torch.tensor,
                                  temperature: float,
-                                 model_device: torch.device) -> torch.tensor:
+                                 model_device: torch.device,
+                                 hard: bool=True) -> torch.tensor:
     """Gumbel softmax trick for binary variables 
 
     Parameters
@@ -501,32 +453,29 @@ def binary_gumbel_softmax_sample(logits: torch.tensor,
     torch.tensor
         Gumbel softmax "bernoulli" variables 
     """
-    y = logits + sample_gumbel(logits.size(), model_device=model_device)
-    return torch.sigmoid(y / temperature)
+    y = logits + sample_logistic(logits.size(), model_device=model_device)
+    y_soft = torch.sigmoid(y/temperature)
+    if hard:
+        y_hard = torch.round(y_soft, decimals=0)
+        y_hard = (y_hard - y_soft).detach() + y_soft
+        return y_hard 
+    else: 
+        return y_soft
 
 
-def categorical_gumbel_softmax_sample(logits: torch.tensor, 
-                                      temperature: float,
-                                      model_device: torch.device) -> torch.tensor:
-    """Gumbel softmax trick for variables with multiple categories 
-
-    Parameters
-    ----------
-    logits : torch.tensor
-        Unnormalized class probabilities 
-    temperature : float
-        Temperature
-    model_device : torch.device
-        Specify where the tensor will be stored 
-
-    Returns
-    -------
-    torch.tensor
-        Gumbel softmax "categorical" variables 
-    """
-    y = logits + sample_gumbel(logits.size(), model_device=model_device)
-    return F.softmax(y / temperature, dim=-1)
-
+class diagLinear(nn.Module):
+    def __init__(self, 
+                 features,
+                 bias):
+        super().__init__()
+        stdv = 1. / np.sqrt(features)
+        self.weight = nn.Parameter(torch.FloatTensor(1, features).uniform_(-stdv, stdv))
+        self.bias = torch.zeros_like(self.weight)
+        if bias:
+            self.bias = nn.Parameter(torch.FloatTensor(1, features).uniform_(-stdv, stdv))
+            
+    def forward(self, X):
+        return X * self.weight + self.bias
 
 class Positive(nn.Module):
     """This class is used to reparametrize model weights 
