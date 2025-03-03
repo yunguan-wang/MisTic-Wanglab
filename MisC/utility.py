@@ -35,7 +35,8 @@ def process_time_ram(message: str=""):
 
 
 def process_adata(adata: sc.AnnData,
-                layer: str) -> sc.AnnData:
+                layer: str,
+                dr_method: str) -> sc.AnnData:
     """Generate UMAP embedding for an AnnData 
 
     Parameters
@@ -58,15 +59,18 @@ def process_adata(adata: sc.AnnData,
     sc.pp.normalize_total(adata, target_sum=1000)
     sc.pp.log1p(adata)
     # We also perform basic visualization 
-    print("UMAP")
     sc.pp.scale(adata)
-    sc.pp.pca(adata)
-    sc.pp.neighbors(adata)
-    sc.tl.umap(adata)
+    if dr_method == "umap":
+        sc.pp.pca(adata)
+        sc.pp.neighbors(adata)    
+        sc.tl.umap(adata)
+    else:
+        sc.pp.pca(adata, n_comps=2)
+        sc.pp.neighbors(adata) 
     # Save the embedding to its own key
     # Note that X_umap always refers to the latest one 
     # Can use sc.pl.embedding(adata, basis="X_umap_???") to plot specific embedding 
-    adata.obsm['X_umap_'+layer] = adata.obsm["X_umap"].copy()
+    adata.obsm['X_'+dr_method+'_'+layer] = adata.obsm["X_"+dr_method].copy()
     return adata
 
 
@@ -82,7 +86,7 @@ def import_data(cell_metadata: Union[str, pd.DataFrame],
                 cell_col: str='cell_id',
                 celltype_col: Optional[str]=None,
                 leiden_res: float=1,
-                preprocess: bool=True,
+                dr_method: str="pca"
                 ) -> Tuple[sc.AnnData, gpd.GeoDataFrame, gpd.GeoDataFrame]:
     """Read in the four pieces information needed for subsequent analysis: 
     cell-by-gene counts, cell metadata, cell boundary information, and transcript information. Some 
@@ -210,11 +214,11 @@ def import_data(cell_metadata: Union[str, pd.DataFrame],
         adata.layers['counts_0'] = adata.X.copy()
         adata.raw = adata.copy()
     
-    if preprocess:
-        # Then we perform basic normalization and transformation 
-        with process_time_ram("Successfully read in data. Performing basic transformation") as ctm:
-            adata = process_adata(adata=adata,
-                                layer="counts_0")
+    # Then we perform basic normalization and transformation 
+    with process_time_ram("Successfully read in data. Performing basic transformation") as ctm:
+        adata = process_adata(adata=adata,
+                            layer="counts_0",
+                            dr_method=dr_method)
     # And we will use leiden to perform cell clustering
     if celltype_col is not None:
         with process_time_ram("Assigning pre-existing cell typing info from metadata.") as ctm:
@@ -235,6 +239,7 @@ def import_data(cell_metadata: Union[str, pd.DataFrame],
         adata.uns['cell_type_leiden_map'].rename(columns={"cell_type": "cell_type_name",
                                                         "leiden": "cell_type_index"},
                                                 inplace=True)
+        adata.uns['dr_method'] = dr_method
         adata.uns['centroid_x_min'] = adata.obs['x'].min()
         adata.uns['centroid_x_max'] = adata.obs['x'].max()
         adata.uns['centroid_y_min'] = adata.obs['y'].min()
@@ -375,7 +380,7 @@ def make_reassignment_adata(adata: sc.AnnData,
                             layer: str,
                             tx_to_reassign: pd.DataFrame,
                             trial_layer: Optional[str]=None,
-                            preprocess: bool=True) -> sc.AnnData:
+                            dr_method: str='pca') -> sc.AnnData:
     """Make the count adjustment on the adata alone 
     This will not alter the tx information 
 
@@ -405,8 +410,7 @@ def make_reassignment_adata(adata: sc.AnnData,
         adata.layers[trial_layer] = adata.layers[layer]+counts_to_add-counts_to_subtract 
         if np.any(adata.layers[trial_layer]<0):
             raise Exception("Negative values generated. This might be due inconsistency between the count matrix and the tx data.")
-        if preprocess:
-            adata = process_adata(adata=adata, layer=trial_layer)
+        adata = process_adata(adata=adata, layer=trial_layer, dr_method=dr_method)
     return adata
 
 

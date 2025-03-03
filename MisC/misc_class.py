@@ -34,6 +34,7 @@ class misc(nn.Module):
                 cell_col: str='cell_id',
                 celltype_col: Optional[str]=None,
                 leiden_res: float=1,
+                dr_method: str='pca',
                 max_centroid_dist: float=50,
                 mask_dist_cutoff: float=5,
                 nearest: int=1,
@@ -84,7 +85,7 @@ class misc(nn.Module):
             'cell_col': cell_col,
             'celltype_col': celltype_col,
             'leiden_res': leiden_res,
-            'preprocess': True
+            'dr_method': dr_method
         }
         self.calculate_mask_distance_par = {
             'max_centroid_dist': max_centroid_dist,
@@ -496,13 +497,15 @@ class misc(nn.Module):
             A dictionary of criterion name-criterion pair. For random assignment, the criterion should be a string, by default {"threshold": 0.5, "random": "random"}
         """
         for criterion_name in tqdm(criteria): 
-            tx_to_reassign = self.intf_tx.filter(pl.col('reassign_probs')==pl.col('reassign_probs').max().over("molecule_id"))
+            tx_to_reassign = self.intf_tx.group_by("molecule_id").agg(pl.all().sort_by("reassign_probs", descending=False).last())
+            tx_to_reassign = tx_to_reassign.drop([['prior_distance_feature',
+                                                'prior_exp_feature',
+                                                'prior_neighbor_exp_feature']])
             criterion = criteria[criterion_name]
             if isinstance(criterion, str):
                 reassign = np.random.binomial(n=1, p=tx_to_reassign['reassign_probs'])
             else:
                 reassign = (tx_to_reassign['reassign_probs']>criterion).to_numpy().astype(int)
-            
             tx_to_reassign = tx_to_reassign.with_columns(pl.Series(name='reassign', values=reassign))
             tx_to_reassign = tx_to_reassign.filter(pl.col("reassign")==1).drop("reassign").to_pandas()
             
@@ -516,7 +519,7 @@ class misc(nn.Module):
                                                 layer=self.current_layer,
                                                 tx_to_reassign=tx_to_reassign,
                                                 trial_layer=trial_layer,
-                                                preprocess=self.import_data_par['preprocess'])
+                                                dr_method=self.import_data_par['dr_method'])
         
     def save_model(self,
                    dir_name: str,
@@ -532,7 +535,7 @@ class misc(nn.Module):
             Other pieces of information will be saved in the same directory 
         """
         if save_reassigning_result:
-            assert selected_criterion in self.tx_to_reassign_dict, "selected_criterion not found in tx_to_reassign_dict"
+            assert self.current_layer+"_"+selected_criterion in self.tx_to_reassign_dict, "selected_criterion not found in tx_to_reassign_dict"
         
         torch.save({'model_state_dict': self.state_dict()} | \
                 {'optimizer_state_dict': self.optimizer.state_dict()}, 

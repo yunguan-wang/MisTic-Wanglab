@@ -128,8 +128,8 @@ def expression_feature(adata: sc.AnnData,
     # 
     overall_log2_mean = np.log2(adata.to_df(layer).mean(axis=0) + 1).to_frame().T
     
-    expression_dist_tree = KDTree(adata.obsm['X_umap_'+layer])
-    _, adj_ind = expression_dist_tree.query(adata.obsm['X_umap_'+layer], k=50, workers=-1)
+    expression_dist_tree = KDTree(adata.obsm['X_'+adata.uns['dr_method']+'_'+layer])
+    _, adj_ind = expression_dist_tree.query(adata.obsm['X_'+adata.uns['dr_method']+'_'+layer], k=50, workers=-1)
     
     adj = pl.from_numpy(adj_ind).with_columns(pl.Series(name="cell_id",
                                                 values=adata.obs_names)).unpivot(index="cell_id").drop("variable")
