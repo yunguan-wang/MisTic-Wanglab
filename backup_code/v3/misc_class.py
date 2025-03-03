@@ -37,12 +37,11 @@ class misc(nn.Module):
                 cell_col: str='cell_id',
                 celltype_col: Optional[str]=None,
                 leiden_res: float=1,
-                preprocess: bool=True,
                 max_centroid_dist: float=50,
                 mask_dist_cutoff: float=5,
                 nearest: int=1,
                 prior_50_reassign_prob: float=0.01,
-                prior_5_reassign_prob: float=0.05,
+                prior_5_reassign_prob: float=0.5,
                 reparametrize: bool=False,
                 seed: int=42,
                 model_device: Optional[Union[str, torch.device]] = None) -> None:
@@ -89,7 +88,7 @@ class misc(nn.Module):
             'cell_col': cell_col,
             'celltype_col': celltype_col,
             'leiden_res': leiden_res,
-            'preprocess': preprocess
+            'preprocess': True
         }
         self.calculate_mask_distance_par = {
             'max_centroid_dist': max_centroid_dist,
@@ -129,18 +128,24 @@ class misc(nn.Module):
             self.model_device = model_device
         self.n_genes = None
         self.n_leiden = None
-        self.alpha = None
-        self.gamma = None
         self.prior_50_reassign_prob = prior_50_reassign_prob
         self.prior_5_reassign_prob = prior_5_reassign_prob
         self.reparametrize = reparametrize
-        self.reassign_coefficients = nn.ModuleDict({}) 
-        self.prior_reassign_coefficients = nn.ModuleDict({}) 
+        
+        self.distance_reassign_coefficients = nn.ModuleDict({})
+        self.self_expression_reassign_coefficients = nn.ModuleDict({})
+        self.neighbor_expression_reassign_coefficients = nn.ModuleDict({})
+        self.prior_distance_reassign_coefficients = nn.ModuleDict({})
+        self.prior_self_expression_reassign_coefficients = nn.ModuleDict({})
+        self.prior_neighbor_expression_reassign_coefficients = nn.ModuleDict({})
+        
         self.cell_type_coefficients = nn.ModuleDict({})  
         self.optimizer = {"intf_tx{}".format(i): None for i in range(nearest)}
         # For training 
         self.CEl_list = {"intf_tx{}".format(i): [] for i in range(nearest)}
-        self.KLD_list = {"intf_tx{}".format(i): [] for i in range(nearest)}
+        self.KLD_list = {"intf_tx{}".format(i): {"distance": [],
+                                                 "self_expression": [],
+                                                 "neighbor_expression": []} for i in range(nearest)}
 
     def import_data(self,
                     cell_metadata: Union[str, pd.DataFrame],
@@ -181,15 +186,6 @@ class misc(nn.Module):
                                                                       **self.import_data_par)
         self.n_genes = self.adata.uns['n_genes']
         self.n_leiden = self.adata.uns['n_leiden']
-        class_fraction = self.adata.obs['leiden'].value_counts(normalize=True).sort_index().values
-        if np.max(class_fraction)/np.min(class_fraction) > 10:
-            self.alpha = 1/np.sqrt(class_fraction)
-            self.alpha = self.alpha/np.sum(self.alpha)
-            self.alpha = torch.tensor(self.alpha, dtype=torch.float32, device=self.model_device)
-            self.gamma = 1
-        else:
-            self.alpha = torch.ones(class_fraction.shape)
-            self.gamma = 0
         print("Computing mask distances... Keep in mind, patience is a virtue...")
         self.mask_distance = calculate_mask_distance(adata=self.adata,
                                                       cell_coords=self.cell_coords,
@@ -232,37 +228,53 @@ class misc(nn.Module):
 
         """
         for intf_tx_name in self.intf_tx_dict:
-            # The reassign_coefficients determines the logit of the reassigning probability of a 
-            # transcript based on computed features.
-            self.reassign_coefficients.update({intf_tx_name: nn.Linear(in_features=3, out_features=1, bias=True)})
-            # Due to the nature of the crafted features, we put a positivity constraint on the coefficients
+            self.distance_reassign_coefficients.update({intf_tx_name: nn.Linear(in_features=1, out_features=1, bias=True)})
+            self.self_expression_reassign_coefficients.update({intf_tx_name: nn.Linear(in_features=1, out_features=1, bias=True)})
+            self.neighbor_expression_reassign_coefficients.update({intf_tx_name: nn.Linear(in_features=1, out_features=1, bias=True)})
             if self.reparametrize:
-                parametrize.register_parametrization(self.reassign_coefficients[intf_tx_name], "weight", Positive())
-        
-        
-            self.prior_reassign_coefficients.update({intf_tx_name: nn.Linear(in_features=3, out_features=1, bias=True)})
+                parametrize.register_parametrization(self.distance_reassign_coefficients[intf_tx_name], "weight", Positive())
+                parametrize.register_parametrization(self.self_expression_reassign_coefficients[intf_tx_name], "weight", Positive())
+                parametrize.register_parametrization(self.neighbor_expression_reassign_coefficients[intf_tx_name], "weight", Positive())
+            
             alpha_0 = -np.log(1/self.prior_50_reassign_prob-1+1e-20)
             temp = -np.log(0.05/0.95)
             alpha_1 = (-np.log(1/self.prior_5_reassign_prob-1+1e-20) - alpha_0)/temp
-            alpha_2 = (-np.log(1/self.prior_5_reassign_prob-1+1e-20) - alpha_0)/temp
-            alpha_3 = (-np.log(1/self.prior_5_reassign_prob-1+1e-20) - alpha_0)/temp
-            self.prior_reassign_coefficients[intf_tx_name].bias = nn.Parameter(torch.tensor(alpha_0, dtype=torch.float32).reshape_as(self.prior_reassign_coefficients[intf_tx_name].bias))
-            self.prior_reassign_coefficients[intf_tx_name].weight = nn.Parameter(torch.tensor([alpha_1, alpha_2, alpha_3], dtype=torch.float32).reshape_as(self.prior_reassign_coefficients[intf_tx_name].weight))
-            for param in self.prior_reassign_coefficients[intf_tx_name].parameters():
+            
+            self.prior_distance_reassign_coefficients.update({intf_tx_name: nn.Linear(in_features=1, out_features=1, bias=True)})
+            self.prior_distance_reassign_coefficients[intf_tx_name].bias = nn.Parameter(torch.tensor(alpha_0, dtype=torch.float32).reshape_as(self.prior_distance_reassign_coefficients[intf_tx_name].bias))
+            self.prior_distance_reassign_coefficients[intf_tx_name].weight = nn.Parameter(torch.tensor(alpha_1, dtype=torch.float32).reshape_as(self.prior_distance_reassign_coefficients[intf_tx_name].weight))
+            for param in self.prior_distance_reassign_coefficients[intf_tx_name].parameters():
                 param.requires_grad = False
+            
+            self.prior_self_expression_reassign_coefficients.update({intf_tx_name: nn.Linear(in_features=1, out_features=1, bias=True)})
+            self.prior_self_expression_reassign_coefficients[intf_tx_name].bias = nn.Parameter(torch.tensor(alpha_0, dtype=torch.float32).reshape_as(self.prior_self_expression_reassign_coefficients[intf_tx_name].bias))
+            self.prior_self_expression_reassign_coefficients[intf_tx_name].weight = nn.Parameter(torch.tensor(alpha_1, dtype=torch.float32).reshape_as(self.prior_self_expression_reassign_coefficients[intf_tx_name].weight))
+            for param in self.prior_self_expression_reassign_coefficients[intf_tx_name].parameters():
+                param.requires_grad = False
+                
+            self.prior_neighbor_expression_reassign_coefficients.update({intf_tx_name: nn.Linear(in_features=1, out_features=1, bias=True)})
+            self.prior_neighbor_expression_reassign_coefficients[intf_tx_name].bias = nn.Parameter(torch.tensor(alpha_0, dtype=torch.float32).reshape_as(self.prior_neighbor_expression_reassign_coefficients[intf_tx_name].bias))
+            self.prior_neighbor_expression_reassign_coefficients[intf_tx_name].weight = nn.Parameter(torch.tensor(alpha_1, dtype=torch.float32).reshape_as(self.prior_neighbor_expression_reassign_coefficients[intf_tx_name].weight))
+            for param in self.prior_neighbor_expression_reassign_coefficients[intf_tx_name].parameters():
+                param.requires_grad = False
+            
             # The cell type coefficients takes the gene counts and outputs the logits for all the cell types 
             self.cell_type_coefficients.update({intf_tx_name: nn.Linear(in_features=self.n_genes, 
                                                 out_features=self.n_leiden,
                                                 bias=True)}) 
             # Adam optimizer
-            self.optimizer[intf_tx_name] = optim.Adam([{'params': self.reassign_coefficients[intf_tx_name].parameters()},
-                                                       {'params': self.prior_reassign_coefficients[intf_tx_name].parameters()},
+            self.optimizer[intf_tx_name] = optim.Adam([{'params': self.distance_reassign_coefficients[intf_tx_name].parameters()},
+                                                       {'params': self.self_expression_reassign_coefficients[intf_tx_name].parameters()},
+                                                       {'params': self.neighbor_expression_reassign_coefficients[intf_tx_name].parameters()},
+                                                       {'params': self.prior_distance_reassign_coefficients[intf_tx_name].parameters()},
+                                                       {'params': self.prior_self_expression_reassign_coefficients[intf_tx_name].parameters()},
+                                                       {'params': self.prior_neighbor_expression_reassign_coefficients[intf_tx_name].parameters()},
                                                        {'params': self.cell_type_coefficients[intf_tx_name].parameters()}], lr=1e-3)
         # Send to correct device 
         self.to(self.model_device)
     
     def encode(self, 
-               tx_features: torch.tensor,
+               tx_features: dict,
                temperature: float,
                intf_tx_name: str) -> Tuple[torch.tensor, torch.tensor]:
         """Compute posterior probability given the features 
@@ -279,18 +291,31 @@ class misc(nn.Module):
         Tuple[torch.tensor, torch.tensor]
             Random sample from the gumbel softmax and the associated probabilities 
         """
-        reassign_logits = self.reassign_coefficients[intf_tx_name](tx_features) 
-        reassign_probs = binary_gumbel_softmax_sample(logits=reassign_logits,
+        distance_reassign_logits = self.distance_reassign_coefficients[intf_tx_name](tx_features['distance_feature'])
+        distance_reassign_probs = binary_gumbel_softmax_sample(logits=distance_reassign_logits,
                                                         temperature=temperature,
                                                         model_device=self.model_device)
+        
+        self_expression_reassign_logits = self.self_expression_reassign_coefficients[intf_tx_name](tx_features['exp_feature'])
+        self_expression_reassign_probs = binary_gumbel_softmax_sample(logits=self_expression_reassign_logits,
+                                                                    temperature=temperature,
+                                                                    model_device=self.model_device)        
+        
+        neighbor_expression_reassign_logits = self.neighbor_expression_reassign_coefficients[intf_tx_name](tx_features['neighbor_exp_feature'])
+        neighbor_expression_reassign_probs = binary_gumbel_softmax_sample(logits=neighbor_expression_reassign_logits,
+                                                                        temperature=temperature,
+                                                                        model_device=self.model_device)
+        
+        reassign_probs = distance_reassign_probs * self_expression_reassign_probs * neighbor_expression_reassign_probs
         reassign_hard = torch.round(reassign_probs, decimals=0)
         reassign_hard = (reassign_hard - reassign_probs).detach() + reassign_probs
         
-        return reassign_hard, reassign_probs
+        return reassign_hard,\
+            distance_reassign_probs, self_expression_reassign_probs, neighbor_expression_reassign_probs
         
     def decode(self, 
                updated_cell_by_gene_counts: torch.tensor,
-               prior_distance_features: torch.tensor,
+               tx_prior_features: dict,
                intf_tx_name: str) -> Tuple[torch.tensor, torch.tensor]:
         """Compute the likelihood and the prior 
 
@@ -307,13 +332,21 @@ class misc(nn.Module):
             Logits for different cell types and the prior reassigning probabilities 
         """
         cell_type_logits = self.cell_type_coefficients[intf_tx_name](updated_cell_by_gene_counts)
-        prior_reassign_logits = self.prior_reassign_coefficients[intf_tx_name](prior_distance_features)
-        prior_reassign_probs = torch.sigmoid(prior_reassign_logits)
-        return cell_type_logits, prior_reassign_probs
+        prior_distance_reassign_logits = self.prior_distance_reassign_coefficients[intf_tx_name](tx_prior_features["prior_distance_feature"])
+        prior_distance_reassign_probs = torch.sigmoid(prior_distance_reassign_logits)
+        
+        prior_self_expression_reassign_logits = self.prior_self_expression_reassign_coefficients[intf_tx_name](tx_prior_features["prior_exp_feature"])
+        prior_self_expression_reassign_probs = torch.sigmoid(prior_self_expression_reassign_logits)
+        
+        prior_neighbor_expression_reassign_logits = self.prior_neighbor_expression_reassign_coefficients[intf_tx_name](tx_prior_features["prior_neighbor_exp_feature"])
+        prior_neighbor_expression_reassign_probs = torch.sigmoid(prior_neighbor_expression_reassign_logits)
+        
+        return cell_type_logits,\
+            prior_distance_reassign_probs, prior_self_expression_reassign_probs, prior_neighbor_expression_reassign_probs
     
     def forward(self,
-                tx_features: torch.tensor, 
-                tx_prior_features: torch.tensor,
+                tx_features: dict, 
+                tx_prior_features: dict,
                 cell_by_gene_counts: torch.tensor, 
                 row_index_self: torch.tensor,
                 row_index_neighbor: torch.tensor,
@@ -345,9 +378,9 @@ class misc(nn.Module):
             Posterior reassignment probabilities, logits for different cell types, and the prior reassigning probabilities 
         """
         # Sample from the posterior 
-        reassign_hard, reassign_probs = self.encode(tx_features=tx_features,
-                                                    temperature=temperature,
-                                                    intf_tx_name=intf_tx_name)
+        reassign_hard, distance_reassign_probs, self_expression_reassign_probs, neighbor_expression_reassign_probs = self.encode(tx_features=tx_features,
+                                                                                                                                temperature=temperature,
+                                                                                                                                intf_tx_name=intf_tx_name)
         # As methods like pivot, and groupby do not exist for tensors 
         # what we are doing here is vectorizing the indices 
         index_self = row_index_self * self.adata.uns['n_genes'] + col_index
@@ -366,17 +399,22 @@ class misc(nn.Module):
         cell_by_gene_counts[ordered_row_index, ordered_col_index] -= update_patch_self.squeeze(1)
         cell_by_gene_counts[ordered_row_index, ordered_col_index] += update_patch_neighbor.squeeze(1)
         # Compute the likelihood and prior 
-        cell_type_logits, prior_reassign_probs = self.decode(updated_cell_by_gene_counts=cell_by_gene_counts,
-                                                            prior_distance_features=tx_prior_features,
-                                                            intf_tx_name=intf_tx_name)
+        cell_type_logits, prior_distance_reassign_probs, prior_self_expression_reassign_probs, prior_neighbor_expression_reassign_probs = self.decode(updated_cell_by_gene_counts=cell_by_gene_counts,
+                                                                                                                                                    tx_prior_features=tx_prior_features,
+                                                                                                                                                    intf_tx_name=intf_tx_name)
         
-        return reassign_probs, cell_type_logits, prior_reassign_probs
+        return distance_reassign_probs, self_expression_reassign_probs, neighbor_expression_reassign_probs,\
+            cell_type_logits, prior_distance_reassign_probs, prior_self_expression_reassign_probs, prior_neighbor_expression_reassign_probs
     
     def loss_function(self,
                       cell_type_logits: torch.tensor, 
                       cell_type_labels: torch.tensor,
-                      reassign_probs: torch.tensor,
-                      prior_reassign_probs: torch.tensor) -> torch.tensor:
+                      distance_reassign_probs: torch.tensor,
+                      self_expression_reassign_probs: torch.tensor,
+                      neighbor_expression_reassign_probs: torch.tensor,
+                      prior_distance_reassign_probs: torch.tensor,
+                      prior_self_expression_reassign_probs: torch.tensor,
+                      prior_neighbor_expression_reassign_probs: torch.tensor) -> torch.tensor:
         """The loss function 
 
         Parameters
@@ -396,18 +434,26 @@ class misc(nn.Module):
             The loss 
         """
         # Cross entropy loss (despite its name it's a loss)
-        CE_loss = F.cross_entropy(cell_type_logits,
-                                cell_type_labels, 
-                                reduction='none')
-        pt = torch.exp(-CE_loss)
-        at = self.alpha.gather(0, cell_type_labels.view(-1))
-        CEl = (at * (1-pt)**self.gamma * CE_loss).mean() 
-        # KL divergence 
-        log_ratio_1 = torch.log(reassign_probs/prior_reassign_probs+1e-20)
-        log_ratio_0 = torch.log((1-reassign_probs)/(1-prior_reassign_probs)+1e-20)
-        KLD_reassign = torch.sum(reassign_probs * log_ratio_1 + (1-reassign_probs) * log_ratio_0, dim=-1).mean()
+        CEl = F.cross_entropy(cell_type_logits,
+                                cell_type_labels, reduction='mean')
+        # KL divergence for distance 
+        distance_log_ratio_1 = torch.log(distance_reassign_probs/prior_distance_reassign_probs+1e-20)
+        distance_log_ratio_0 = torch.log((1-distance_reassign_probs)/(1-prior_distance_reassign_probs)+1e-20)
+        distance_KLD_reassign = torch.sum(distance_reassign_probs * distance_log_ratio_1 + (1-distance_reassign_probs) * distance_log_ratio_0, dim=-1).mean()
+        # KL divergence for self expression 
+        self_expression_log_ratio_1 = torch.log(self_expression_reassign_probs/prior_self_expression_reassign_probs+1e-20)
+        self_expression_log_ratio_0 = torch.log((1-self_expression_reassign_probs)/(1-prior_self_expression_reassign_probs)+1e-20)
+        self_expression_KLD_reassign = torch.sum(self_expression_reassign_probs * self_expression_log_ratio_1 + (1-self_expression_reassign_probs) * self_expression_log_ratio_0, dim=-1).mean()
+        # KL divergence for neigh expression 
+        neighbor_expression_log_ratio_1 = torch.log(neighbor_expression_reassign_probs/prior_neighbor_expression_reassign_probs+1e-20)
+        neighbor_expression_log_ratio_0 = torch.log((1-neighbor_expression_reassign_probs)/(1-prior_neighbor_expression_reassign_probs)+1e-20)
+        neighbor_expression_KLD_reassign = torch.sum(neighbor_expression_reassign_probs * neighbor_expression_log_ratio_1 + (1-neighbor_expression_reassign_probs) * neighbor_expression_log_ratio_0, dim=-1).mean()
         
-        return CEl + KLD_reassign, CEl.detach().cpu().numpy().item(), KLD_reassign.detach().cpu().numpy().item()
+        return CEl + distance_KLD_reassign + self_expression_KLD_reassign + neighbor_expression_KLD_reassign,\
+            CEl.detach().cpu().numpy().item(),\
+            distance_KLD_reassign.detach().cpu().numpy().item(),\
+            self_expression_KLD_reassign.detach().cpu().numpy().item(),\
+            neighbor_expression_KLD_reassign.detach().cpu().numpy().item()
     
     def training_loop(self,
                       n_epochs: int,
@@ -443,7 +489,9 @@ class misc(nn.Module):
                 self.current_temperature = self.init_temperature
                 train_loss = 0.0
                 CEl_epoch_list = []
-                KLD_epoch_list = []
+                KLD_epoch_list = {"distance": [],
+                                  "self_expression": [],
+                                  "neighbor_expression": []}
                 for minibatch_ind, coord in tqdm(enumerate(self.coord_list[intf_tx_name]),
                                                 total=len(self.coord_list[intf_tx_name]),
                                                 desc=intf_tx_name):
@@ -454,23 +502,30 @@ class misc(nn.Module):
                                                                                                                                                     coord_tuple=coord,
                                                                                                                                                     model_device=self.model_device)
                     # Compute likelihood, prior, and posterior 
-                    reassign_probs, cell_type_logits, prior_reassign_probs = self(tx_features=tx_features, 
-                                                                                tx_prior_features=tx_prior_features,                
-                                                                                cell_by_gene_counts=cell_by_gene_counts, 
-                                                                                row_index_self=row_index_self,
-                                                                                row_index_neighbor=row_index_neighbor,
-                                                                                col_index=col_index,
-                                                                                temperature=self.current_temperature,
-                                                                                intf_tx_name=intf_tx_name)
+                    distance_reassign_probs, self_expression_reassign_probs, neighbor_expression_reassign_probs,\
+                        cell_type_logits, prior_distance_reassign_probs, prior_self_expression_reassign_probs, prior_neighbor_expression_reassign_probs = self(tx_features=tx_features, 
+                                                                                                                                                            tx_prior_features=tx_prior_features,                
+                                                                                                                                                            cell_by_gene_counts=cell_by_gene_counts, 
+                                                                                                                                                            row_index_self=row_index_self,
+                                                                                                                                                            row_index_neighbor=row_index_neighbor,
+                                                                                                                                                            col_index=col_index,
+                                                                                                                                                            temperature=self.current_temperature,
+                                                                                                                                                            intf_tx_name=intf_tx_name)
                     # Loss and gradient 
                     self.optimizer[intf_tx_name].zero_grad()
-                    loss, CEl, KLD = self.loss_function(cell_type_logits=cell_type_logits,
-                                                    cell_type_labels=cell_type_labels,
-                                                    reassign_probs=reassign_probs,
-                                                    prior_reassign_probs=prior_reassign_probs)
+                    loss, CEl, distance_KLD, self_expression_KLD, neighbor_expression_KLD = self.loss_function(cell_type_logits=cell_type_logits,
+                                                                                                    cell_type_labels=cell_type_labels,
+                                                                                                    distance_reassign_probs=distance_reassign_probs,
+                                                                                                    self_expression_reassign_probs=self_expression_reassign_probs,
+                                                                                                    neighbor_expression_reassign_probs=neighbor_expression_reassign_probs,
+                                                                                                    prior_distance_reassign_probs=prior_distance_reassign_probs,
+                                                                                                    prior_self_expression_reassign_probs=prior_self_expression_reassign_probs,
+                                                                                                    prior_neighbor_expression_reassign_probs=prior_neighbor_expression_reassign_probs)
                     loss.backward()
                     CEl_epoch_list.append(CEl)
-                    KLD_epoch_list.append(KLD)
+                    KLD_epoch_list['distance'].append(distance_KLD)
+                    KLD_epoch_list['self_expression'].append(self_expression_KLD)
+                    KLD_epoch_list["neighbor_expression"].append(neighbor_expression_KLD)
                     train_loss += loss.item()
                     self.optimizer[intf_tx_name].step()
                     # We gradually decrease the temperature so that the posterior would approach a bernoulli 
@@ -483,7 +538,9 @@ class misc(nn.Module):
                                     100. * minibatch_ind / len(self.coord_list[intf_tx_name]),
                                     loss.item()))
                 self.CEl_list[intf_tx_name].append(CEl_epoch_list)
-                self.KLD_list[intf_tx_name].append(KLD_epoch_list)
+                self.KLD_list[intf_tx_name]['distance'].append(KLD_epoch_list['distance'])
+                self.KLD_list[intf_tx_name]['self_expression'].append(KLD_epoch_list['self_expression'])
+                self.KLD_list[intf_tx_name]['neighbor_expression'].append(KLD_epoch_list['neighbor_expression'])
                 print('====> Epoch: {} Average loss: {:.4f}'.format(
                         epoch, train_loss / len(self.coord_list[intf_tx_name])))
 
@@ -500,13 +557,19 @@ class misc(nn.Module):
                                                 chunk_size=np.ceil(intf_tx.shape[0]/100))
                 reassign_probs = np.array([], dtype=float).reshape(0,1)
                 for tx_features_chunk in tqdm(tx_features_chunks):
-                    tx_features = torch.tensor(tx_features_chunk, 
-                                            dtype=torch.float32, 
-                                            device=self.model_device)
-                    _, reassign_probs_chunk = self.encode(tx_features=tx_features,
-                                                            temperature=self.min_temperature,
-                                                            intf_tx_name=intf_tx_name)
-                    reassign_probs = np.vstack([reassign_probs, reassign_probs_chunk.cpu().numpy()])
+                    tx_features = {"distance_feature": torch.tensor(tx_features_chunk[:,[0]], 
+                                                    dtype=torch.float32, device=self.model_device),
+                                    "exp_feature": torch.tensor(tx_features_chunk[:,[1]], 
+                                                                        dtype=torch.float32, device=self.model_device),
+                                    "neighbor_exp_feature": torch.tensor(tx_features_chunk[:,[2]], 
+                                                                        dtype=torch.float32, device=self.model_device)}
+                    _, distance_reassign_probs_chunk, self_expression_reassign_probs_chunk, neighbor_expression_reassign_probs_chunk = self.encode(tx_features=tx_features,
+                                                                                                                                                temperature=self.min_temperature,
+                                                                                                                                                intf_tx_name=intf_tx_name)
+                    reassign_probs_chunk = distance_reassign_probs_chunk.cpu().numpy() *\
+                                        self_expression_reassign_probs_chunk.cpu().numpy() *\
+                                        neighbor_expression_reassign_probs_chunk.cpu().numpy()
+                    reassign_probs = np.vstack([reassign_probs, reassign_probs_chunk])
                 # Store the computed probabilities 
                 self.intf_tx_dict[intf_tx_name] = intf_tx.with_columns(pl.Series(name="reassign_probs", values=reassign_probs.squeeze(-1)))
         

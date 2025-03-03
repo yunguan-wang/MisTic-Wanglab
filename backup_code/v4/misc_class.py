@@ -4,21 +4,18 @@ import json
 import pandas as pd
 import scanpy as sc
 import geopandas as gpd
-from geopandas import read_parquet
 import polars as pl 
 # Data manipulation 
 import numpy as np
-from scipy.special import softmax
-from scipy.stats import entropy, ks_2samp
+from scipy.stats import ks_2samp
 import torch 
 import torch.nn as nn 
 from torch import optim
 import torch.nn.functional as F
-from torch.distributions import Beta
 import torch.nn.utils.parametrize as parametrize
 # Utility function 
 from MisC.utility import import_data, calculate_mask_distance, binary_gumbel_softmax_sample,\
-        make_reassignment_adata, Positive, JSONEncoder, even_split, process_time_ram
+        make_reassignment_adata, diagLinear, Positive, JSONEncoder, even_split, process_time_ram
 from MisC.generate_tx_feature import generate_feature
 from MisC.data_loader import generate_patch_coords, load_patch
 # User entertainment
@@ -37,13 +34,11 @@ class misc(nn.Module):
                 cell_col: str='cell_id',
                 celltype_col: Optional[str]=None,
                 leiden_res: float=1,
-                preprocess: bool=True,
                 max_centroid_dist: float=50,
                 mask_dist_cutoff: float=5,
                 nearest: int=1,
-                prior_50_reassign_prob: float=0.01,
-                prior_5_reassign_prob: float=0.05,
-                reparametrize: bool=False,
+                prior_50_reassign_prob: float=1e-6,
+                prior_5_reassign_prob: float=0.8,
                 seed: int=42,
                 model_device: Optional[Union[str, torch.device]] = None) -> None:
         """Instantiate a misc object 
@@ -89,7 +84,7 @@ class misc(nn.Module):
             'cell_col': cell_col,
             'celltype_col': celltype_col,
             'leiden_res': leiden_res,
-            'preprocess': preprocess
+            'preprocess': True
         }
         self.calculate_mask_distance_par = {
             'max_centroid_dist': max_centroid_dist,
@@ -129,13 +124,12 @@ class misc(nn.Module):
             self.model_device = model_device
         self.n_genes = None
         self.n_leiden = None
-        self.alpha = None
-        self.gamma = None
-        self.prior_50_reassign_prob = prior_50_reassign_prob
-        self.prior_5_reassign_prob = prior_5_reassign_prob
-        self.reparametrize = reparametrize
-        self.reassign_coefficients = nn.ModuleDict({}) 
-        self.prior_reassign_coefficients = nn.ModuleDict({}) 
+        self.prior_50_reassign_prob = np.power(prior_50_reassign_prob, 1/3)
+        self.prior_5_reassign_prob = np.power(prior_5_reassign_prob, 1/3)
+        
+        self.reassign_coefficients = nn.ModuleDict({})
+        self.prior_reassign_coefficients = nn.ModuleDict({})
+
         self.cell_type_coefficients = nn.ModuleDict({})  
         self.optimizer = {"intf_tx{}".format(i): None for i in range(nearest)}
         # For training 
@@ -181,15 +175,6 @@ class misc(nn.Module):
                                                                       **self.import_data_par)
         self.n_genes = self.adata.uns['n_genes']
         self.n_leiden = self.adata.uns['n_leiden']
-        class_fraction = self.adata.obs['leiden'].value_counts(normalize=True).sort_index().values
-        if np.max(class_fraction)/np.min(class_fraction) > 10:
-            self.alpha = 1/np.sqrt(class_fraction)
-            self.alpha = self.alpha/np.sum(self.alpha)
-            self.alpha = torch.tensor(self.alpha, dtype=torch.float32, device=self.model_device)
-            self.gamma = 1
-        else:
-            self.alpha = torch.ones(class_fraction.shape)
-            self.gamma = 0
         print("Computing mask distances... Keep in mind, patience is a virtue...")
         self.mask_distance = calculate_mask_distance(adata=self.adata,
                                                       cell_coords=self.cell_coords,
@@ -232,24 +217,19 @@ class misc(nn.Module):
 
         """
         for intf_tx_name in self.intf_tx_dict:
-            # The reassign_coefficients determines the logit of the reassigning probability of a 
-            # transcript based on computed features.
-            self.reassign_coefficients.update({intf_tx_name: nn.Linear(in_features=3, out_features=1, bias=True)})
-            # Due to the nature of the crafted features, we put a positivity constraint on the coefficients
-            if self.reparametrize:
-                parametrize.register_parametrization(self.reassign_coefficients[intf_tx_name], "weight", Positive())
-        
-        
-            self.prior_reassign_coefficients.update({intf_tx_name: nn.Linear(in_features=3, out_features=1, bias=True)})
+            self.reassign_coefficients.update({intf_tx_name: diagLinear(features=3, bias=True)})
+            parametrize.register_parametrization(self.reassign_coefficients[intf_tx_name], "weight", Positive())
+            
             alpha_0 = -np.log(1/self.prior_50_reassign_prob-1+1e-20)
             temp = -np.log(0.05/0.95)
             alpha_1 = (-np.log(1/self.prior_5_reassign_prob-1+1e-20) - alpha_0)/temp
-            alpha_2 = (-np.log(1/self.prior_5_reassign_prob-1+1e-20) - alpha_0)/temp
-            alpha_3 = (-np.log(1/self.prior_5_reassign_prob-1+1e-20) - alpha_0)/temp
-            self.prior_reassign_coefficients[intf_tx_name].bias = nn.Parameter(torch.tensor(alpha_0, dtype=torch.float32).reshape_as(self.prior_reassign_coefficients[intf_tx_name].bias))
-            self.prior_reassign_coefficients[intf_tx_name].weight = nn.Parameter(torch.tensor([alpha_1, alpha_2, alpha_3], dtype=torch.float32).reshape_as(self.prior_reassign_coefficients[intf_tx_name].weight))
+            
+            self.prior_reassign_coefficients.update({intf_tx_name: diagLinear(features=3, bias=True)})
+            self.prior_reassign_coefficients[intf_tx_name].bias = nn.Parameter(torch.tensor([alpha_0]*3, dtype=torch.float32).reshape_as(self.prior_reassign_coefficients[intf_tx_name].bias))
+            self.prior_reassign_coefficients[intf_tx_name].weight = nn.Parameter(torch.tensor([alpha_1]*3, dtype=torch.float32).reshape_as(self.prior_reassign_coefficients[intf_tx_name].weight))
             for param in self.prior_reassign_coefficients[intf_tx_name].parameters():
                 param.requires_grad = False
+            
             # The cell type coefficients takes the gene counts and outputs the logits for all the cell types 
             self.cell_type_coefficients.update({intf_tx_name: nn.Linear(in_features=self.n_genes, 
                                                 out_features=self.n_leiden,
@@ -279,18 +259,20 @@ class misc(nn.Module):
         Tuple[torch.tensor, torch.tensor]
             Random sample from the gumbel softmax and the associated probabilities 
         """
-        reassign_logits = self.reassign_coefficients[intf_tx_name](tx_features) 
-        reassign_probs = binary_gumbel_softmax_sample(logits=reassign_logits,
+        reassign_logits = self.reassign_coefficients[intf_tx_name](tx_features)
+        reassign_probs = torch.sigmoid(reassign_logits)
+        individual_reassign_hard = binary_gumbel_softmax_sample(logits=reassign_logits,
                                                         temperature=temperature,
-                                                        model_device=self.model_device)
-        reassign_hard = torch.round(reassign_probs, decimals=0)
-        reassign_hard = (reassign_hard - reassign_probs).detach() + reassign_probs
+                                                        model_device=self.model_device,
+                                                        hard=True)
+        
+        reassign_hard = torch.prod(individual_reassign_hard, dim=1, keepdim=True)
         
         return reassign_hard, reassign_probs
         
     def decode(self, 
                updated_cell_by_gene_counts: torch.tensor,
-               prior_distance_features: torch.tensor,
+               tx_prior_features: torch.tensor,
                intf_tx_name: str) -> Tuple[torch.tensor, torch.tensor]:
         """Compute the likelihood and the prior 
 
@@ -307,13 +289,15 @@ class misc(nn.Module):
             Logits for different cell types and the prior reassigning probabilities 
         """
         cell_type_logits = self.cell_type_coefficients[intf_tx_name](updated_cell_by_gene_counts)
-        prior_reassign_logits = self.prior_reassign_coefficients[intf_tx_name](prior_distance_features)
+        
+        prior_reassign_logits = self.prior_reassign_coefficients[intf_tx_name](tx_prior_features)
         prior_reassign_probs = torch.sigmoid(prior_reassign_logits)
+        
         return cell_type_logits, prior_reassign_probs
     
     def forward(self,
-                tx_features: torch.tensor, 
-                tx_prior_features: torch.tensor,
+                tx_features: dict, 
+                tx_prior_features: dict,
                 cell_by_gene_counts: torch.tensor, 
                 row_index_self: torch.tensor,
                 row_index_neighbor: torch.tensor,
@@ -366,8 +350,8 @@ class misc(nn.Module):
         cell_by_gene_counts[ordered_row_index, ordered_col_index] -= update_patch_self.squeeze(1)
         cell_by_gene_counts[ordered_row_index, ordered_col_index] += update_patch_neighbor.squeeze(1)
         # Compute the likelihood and prior 
-        cell_type_logits, prior_reassign_probs = self.decode(updated_cell_by_gene_counts=cell_by_gene_counts,
-                                                            prior_distance_features=tx_prior_features,
+        cell_type_logits, prior_reassign_probs= self.decode(updated_cell_by_gene_counts=cell_by_gene_counts,
+                                                            tx_prior_features=tx_prior_features,
                                                             intf_tx_name=intf_tx_name)
         
         return reassign_probs, cell_type_logits, prior_reassign_probs
@@ -396,18 +380,14 @@ class misc(nn.Module):
             The loss 
         """
         # Cross entropy loss (despite its name it's a loss)
-        CE_loss = F.cross_entropy(cell_type_logits,
-                                cell_type_labels, 
-                                reduction='none')
-        pt = torch.exp(-CE_loss)
-        at = self.alpha.gather(0, cell_type_labels.view(-1))
-        CEl = (at * (1-pt)**self.gamma * CE_loss).mean() 
+        CEl = F.cross_entropy(cell_type_logits,
+                                cell_type_labels, reduction='mean')
         # KL divergence 
         log_ratio_1 = torch.log(reassign_probs/prior_reassign_probs+1e-20)
         log_ratio_0 = torch.log((1-reassign_probs)/(1-prior_reassign_probs)+1e-20)
-        KLD_reassign = torch.sum(reassign_probs * log_ratio_1 + (1-reassign_probs) * log_ratio_0, dim=-1).mean()
+        KLD_reassign = torch.mean(reassign_probs * log_ratio_1 + (1-reassign_probs) * log_ratio_0, dim=0)
         
-        return CEl + KLD_reassign, CEl.detach().cpu().numpy().item(), KLD_reassign.detach().cpu().numpy().item()
+        return CEl + KLD_reassign.sum(), CEl.detach().cpu().numpy().item(), KLD_reassign.detach().cpu().numpy()
     
     def training_loop(self,
                       n_epochs: int,
@@ -454,7 +434,7 @@ class misc(nn.Module):
                                                                                                                                                     coord_tuple=coord,
                                                                                                                                                     model_device=self.model_device)
                     # Compute likelihood, prior, and posterior 
-                    reassign_probs, cell_type_logits, prior_reassign_probs = self(tx_features=tx_features, 
+                    reassign_probs, cell_type_logits, prior_reassign_probs= self(tx_features=tx_features, 
                                                                                 tx_prior_features=tx_prior_features,                
                                                                                 cell_by_gene_counts=cell_by_gene_counts, 
                                                                                 row_index_self=row_index_self,
@@ -465,9 +445,9 @@ class misc(nn.Module):
                     # Loss and gradient 
                     self.optimizer[intf_tx_name].zero_grad()
                     loss, CEl, KLD = self.loss_function(cell_type_logits=cell_type_logits,
-                                                    cell_type_labels=cell_type_labels,
-                                                    reassign_probs=reassign_probs,
-                                                    prior_reassign_probs=prior_reassign_probs)
+                                                        cell_type_labels=cell_type_labels,
+                                                        reassign_probs=reassign_probs,
+                                                        prior_reassign_probs=prior_reassign_probs)
                     loss.backward()
                     CEl_epoch_list.append(CEl)
                     KLD_epoch_list.append(KLD)
@@ -482,8 +462,8 @@ class misc(nn.Module):
                                 epoch, minibatch_ind, len(self.coord_list[intf_tx_name]),
                                     100. * minibatch_ind / len(self.coord_list[intf_tx_name]),
                                     loss.item()))
-                self.CEl_list[intf_tx_name].append(CEl_epoch_list)
-                self.KLD_list[intf_tx_name].append(KLD_epoch_list)
+                self.CEl_list[intf_tx_name].append(np.array(CEl_epoch_list))
+                self.KLD_list[intf_tx_name].append(np.array(KLD_epoch_list))
                 print('====> Epoch: {} Average loss: {:.4f}'.format(
                         epoch, train_loss / len(self.coord_list[intf_tx_name])))
 
@@ -500,12 +480,11 @@ class misc(nn.Module):
                                                 chunk_size=np.ceil(intf_tx.shape[0]/100))
                 reassign_probs = np.array([], dtype=float).reshape(0,1)
                 for tx_features_chunk in tqdm(tx_features_chunks):
-                    tx_features = torch.tensor(tx_features_chunk, 
-                                            dtype=torch.float32, 
-                                            device=self.model_device)
+                    tx_features = torch.tensor(tx_features_chunk, dtype=torch.float32, device=self.model_device)
                     _, reassign_probs_chunk = self.encode(tx_features=tx_features,
                                                             temperature=self.min_temperature,
                                                             intf_tx_name=intf_tx_name)
+                    reassign_probs_chunk = torch.prod(reassign_probs_chunk, dim=1, keepdim=True)
                     reassign_probs = np.vstack([reassign_probs, reassign_probs_chunk.cpu().numpy()])
                 # Store the computed probabilities 
                 self.intf_tx_dict[intf_tx_name] = intf_tx.with_columns(pl.Series(name="reassign_probs", values=reassign_probs.squeeze(-1)))
@@ -589,7 +568,6 @@ class misc(nn.Module):
                       'n_leiden': self.n_leiden,
                       'prior_50_reassign_prob': self.prior_50_reassign_prob,
                       'prior_5_reassign_prob': self.prior_5_reassign_prob,
-                      'reparametrize': self.reparametrize,
                       'current_layer': self.current_layer,
                       "save_reassigning_result": save_reassigning_result,
                       "selected_criterion": selected_criterion}
@@ -603,8 +581,6 @@ class misc(nn.Module):
                                            "neighbor_cell_id": "reassigned_cell_id"},
                                   inplace=True)
             tx_to_reassign.to_parquet(os.path.join(dir_name, model_name+"_tx_to_reassign.parquet"))
-            # with open(os.path.join(dir_name, model_name+"_tx_to_reassign_dict.json"), "w") as f:
-            #     json.dump(self.tx_to_reassign_dict, f, cls=JSONEncoder)
         
     def load_model(self,
                    dir_name: str,
@@ -627,7 +603,6 @@ class misc(nn.Module):
         self.current_layer = model_meta['current_layer']
         self.prior_50_reassign_prob = model_meta['prior_50_reassign_prob']
         self.prior_5_reassign_prob = model_meta['prior_5_reassign_prob']
-        self.reparametrize = model_meta['reparametrize']
         
         save_reassigning_result = model_meta['save_reassigning_result']
         selected_criterion = model_meta['selected_criterion']
@@ -638,9 +613,6 @@ class misc(nn.Module):
                                            "reassigned_cell_id": "neighbor_cell_id"},
                                   inplace=True)
             self.tx_to_reassign_dict = {self.current_layer+"_"+selected_criterion: tx_to_reassign}
-            # self.tx_to_reassign_dict = json.load(open(os.path.join(dir_name, model_name+"_tx_to_reassign_dict.json")))
-            # for k in self.tx_to_reassign_dict:
-            #     self.tx_to_reassign_dict[k] = pd.read_json(self.tx_to_reassign_dict[k])
         
         self.initialize_parameters()
         checkpoint = torch.load(os.path.join(dir_name, model_name+".pt")) 
