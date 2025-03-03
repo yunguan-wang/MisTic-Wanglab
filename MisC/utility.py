@@ -86,7 +86,7 @@ def import_data(cell_metadata: Union[str, pd.DataFrame],
                 cell_col: str='cell_id',
                 celltype_col: Optional[str]=None,
                 leiden_res: float=1,
-                dr_method: str="pca"
+                dr_method: str="umap"
                 ) -> Tuple[sc.AnnData, gpd.GeoDataFrame, gpd.GeoDataFrame]:
     """Read in the four pieces information needed for subsequent analysis: 
     cell-by-gene counts, cell metadata, cell boundary information, and transcript information. Some 

@@ -34,7 +34,7 @@ class misc(nn.Module):
                 cell_col: str='cell_id',
                 celltype_col: Optional[str]=None,
                 leiden_res: float=1,
-                dr_method: str='pca',
+                dr_method: str='umap',
                 max_centroid_dist: float=50,
                 mask_dist_cutoff: float=5,
                 nearest: int=1,
