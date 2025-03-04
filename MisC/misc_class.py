@@ -498,9 +498,9 @@ class misc(nn.Module):
         """
         for criterion_name in tqdm(criteria): 
             tx_to_reassign = self.intf_tx.group_by("molecule_id").agg(pl.all().sort_by("reassign_probs", descending=False).last())
-            tx_to_reassign = tx_to_reassign.drop([['prior_distance_feature',
+            tx_to_reassign = tx_to_reassign.drop(['prior_distance_feature',
                                                 'prior_exp_feature',
-                                                'prior_neighbor_exp_feature']])
+                                                'prior_neighbor_exp_feature'])
             criterion = criteria[criterion_name]
             if isinstance(criterion, str):
                 reassign = np.random.binomial(n=1, p=tx_to_reassign['reassign_probs'])
