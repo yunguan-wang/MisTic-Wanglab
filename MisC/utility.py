@@ -69,7 +69,7 @@ def process_adata(adata: sc.AnnData,
         sc.pp.neighbors(adata) 
     # Save the embedding to its own key
     # Note that X_umap always refers to the latest one 
-    # Can use sc.pl.embedding(adata, basis="X_umap_???") to plot specific embedding 
+    # Can use sc.pl.embedding(adata, basis="X_umap_???", color="cell_type") to plot specific embedding 
     adata.obsm['X_'+dr_method+'_'+layer] = adata.obsm["X_"+dr_method].copy()
     return adata
 
@@ -160,9 +160,13 @@ def import_data(cell_metadata: Union[str, pd.DataFrame],
         else: 
             raise TypeError("Only .parquet/.csv file or geopandas/pandas dataframe is allowed")
 
+        tx_metadata.rename(columns={tx_x_col: "global_x",
+                                    tx_y_col: "global_y"},
+                           inplace=True, errors='raise')
+        
         if not isinstance(tx_metadata, gpd.GeoDataFrame):
             tx_metadata = gpd.GeoDataFrame(tx_metadata, 
-                                        geometry=gpd.points_from_xy(tx_metadata[tx_x_col], tx_metadata[tx_y_col]))
+                                        geometry=gpd.points_from_xy(tx_metadata["global_x"], tx_metadata["global_y"]))
         
         tx_metadata.reset_index(drop=True, inplace=True)
         tx_metadata.index = "tx_" + tx_metadata.index.astype(str)

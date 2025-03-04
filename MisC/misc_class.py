@@ -376,8 +376,8 @@ class misc(nn.Module):
         CEl = F.cross_entropy(cell_type_logits,
                                 cell_type_labels, reduction='mean')
         # KL divergence 
-        log_ratio_1 = torch.log(reassign_probs/prior_reassign_probs+1e-20)
-        log_ratio_0 = torch.log((1-reassign_probs)/(1-prior_reassign_probs)+1e-20)
+        log_ratio_1 = torch.log(reassign_probs/(prior_reassign_probs+1e-20)+1e-20)
+        log_ratio_0 = torch.log((1-reassign_probs)/(1-prior_reassign_probs+1e-20)+1e-20)
         KLD_reassign = torch.mean(reassign_probs * log_ratio_1 + (1-reassign_probs) * log_ratio_0, dim=0)
         
         return CEl + KLD_reassign.sum(), CEl.detach().cpu().numpy().item(), KLD_reassign.detach().cpu().numpy()
@@ -420,6 +420,7 @@ class misc(nn.Module):
             for neighbor_index in neighbor_indices:
                 key = "neighbor"+str(neighbor_index)
                 np.random.shuffle(self.coord_list[key])
+                sub_intf_tx = self.intf_tx.filter(pl.col("neighbor_index") == neighbor_index)
                 train_loss = 0.0
                 for minibatch_ind, coord in tqdm(enumerate(self.coord_list[key]),
                                                 total=len(self.coord_list[key]),
@@ -427,10 +428,9 @@ class misc(nn.Module):
                     # Load data 
                     cell_by_gene_counts, tx_features, tx_prior_features, cell_type_labels, row_index_self, row_index_neighbor, col_index = load_patch(adata_w_leiden_xy=adata_w_leiden_xy,
                                                                                                                                                     adata_var=adata_var,
-                                                                                                                                                    intf_tx=self.intf_tx,
+                                                                                                                                                    intf_tx=sub_intf_tx,
                                                                                                                                                     coord_tuple=coord,
-                                                                                                                                                    model_device=self.model_device,
-                                                                                                                                                    neighbor_index=neighbor_index)
+                                                                                                                                                    model_device=self.model_device)
                     # Compute likelihood, prior, and posterior 
                     reassign_probs, cell_type_logits, prior_reassign_probs= self(tx_features=tx_features, 
                                                                                 tx_prior_features=tx_prior_features,                
