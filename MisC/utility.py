@@ -124,7 +124,7 @@ def import_data(cell_metadata: Union[str, pd.DataFrame],
         if isinstance(cell_metadata, str) and ("csv" in os.path.splitext(cell_metadata)[1]):
             cell_meta = pd.read_csv(cell_metadata, index_col=0)
         elif isinstance(cell_metadata, pd.DataFrame):
-            cell_meta = cell_metadata
+            cell_meta = cell_metadata.copy()
         else: 
             raise TypeError("Only .csv file or pandas dataframe is allowed")
         cell_meta.index.rename(name='cell_id', inplace=True)
@@ -136,7 +136,7 @@ def import_data(cell_metadata: Union[str, pd.DataFrame],
         if isinstance(cell_boundary_polygons, str) and ("parquet" in os.path.splitext(cell_boundary_polygons)[1]):
             cell_coords = read_parquet(cell_boundary_polygons)
         elif isinstance(cell_boundary_polygons, gpd.GeoDataFrame):
-            cell_coords = cell_boundary_polygons
+            cell_coords = cell_boundary_polygons.copy()
         else: 
             raise TypeError("Only .parquet file or geopandas dataframe is allowed")
         cell_coords.index.rename(name='cell_id', inplace=True)
@@ -156,7 +156,7 @@ def import_data(cell_metadata: Union[str, pd.DataFrame],
         elif isinstance(detected_transcripts, str) and ("csv" in os.path.splitext(detected_transcripts)[1]):
             tx_metadata = pd.read_csv(detected_transcripts, index_col=0)    
         elif isinstance(detected_transcripts, pd.DataFrame) or isinstance(detected_transcripts, gpd.GeoDataFrame):
-            tx_metadata = detected_transcripts
+            tx_metadata = detected_transcripts.copy()
         else: 
             raise TypeError("Only .parquet/.csv file or geopandas/pandas dataframe is allowed")
 
@@ -183,7 +183,7 @@ def import_data(cell_metadata: Union[str, pd.DataFrame],
             if isinstance(cell_by_gene_counts, str) and ("csv" in os.path.splitext(cell_by_gene_counts)[1]):
                 counts = pd.read_csv(cell_by_gene_counts, index_col=0)
             elif isinstance(cell_by_gene_counts, pd.DataFrame):
-                counts = cell_by_gene_counts
+                counts = cell_by_gene_counts.copy()
             else: 
                 raise TypeError("Only .csv file or pandas dataframe is allowed")
         else: 

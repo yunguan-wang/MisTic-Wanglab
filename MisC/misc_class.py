@@ -509,6 +509,15 @@ class misc(nn.Module):
             tx_to_reassign = tx_to_reassign.with_columns(pl.Series(name='reassign', values=reassign))
             tx_to_reassign = tx_to_reassign.filter(pl.col("reassign")==1).drop("reassign").to_pandas()
             
+            tx_to_reassign = tx_to_reassign.join(self.adata.obs[['cell_type']].rename(columns={"cell_type": "from_cell_type"}),
+                                                 how='left', left_on='cell_id', right_index=True)
+            tx_to_reassign = tx_to_reassign.join(self.adata.obs[['cell_type']].rename(columns={"cell_type": "to_cell_type"}),
+                                                 how='left', left_on='neighbor_cell_id', right_index=True)
+            tx_to_reassign.rename(columns={"cell_id": "from_cell_id",
+                                           "neighbor_cell_id": "to_cell_id"},
+                                  inplace=True)
+            tx_to_reassign.drop(columns=["cell_type", "neighbor_celltype"], inplace=True)
+            
             trial_layer = self.current_layer+"_"+criterion_name
             # For each criterion, we store the update 
             # And make assignment to the count matrix 
@@ -557,9 +566,6 @@ class misc(nn.Module):
             
         if save_reassigning_result:
             tx_to_reassign = self.tx_to_reassign_dict[self.current_layer+"_"+selected_criterion].copy()
-            tx_to_reassign.rename(columns={"cell_id": "original_cell_id",
-                                           "neighbor_cell_id": "reassigned_cell_id"},
-                                  inplace=True)
             tx_to_reassign.to_parquet(os.path.join(dir_name, model_name+"_tx_to_reassign.parquet"))
         
     def load_model(self,
@@ -589,9 +595,6 @@ class misc(nn.Module):
         
         if save_reassigning_result:
             tx_to_reassign = pd.read_parquet(os.path.join(dir_name, model_name+"_tx_to_reassign.parquet"))
-            tx_to_reassign.rename(columns={"original_cell_id": "cell_id",
-                                           "reassigned_cell_id": "neighbor_cell_id"},
-                                  inplace=True)
             self.tx_to_reassign_dict = {self.current_layer+"_"+selected_criterion: tx_to_reassign}
         
         self.initialize_parameters()
