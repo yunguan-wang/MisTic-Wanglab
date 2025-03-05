@@ -5,6 +5,7 @@ import scanpy as sc
 import geopandas as gpd
 from geopandas import read_parquet
 import pandas as pd
+import polars as pl
 # Data manipulation 
 import re 
 import numpy as np
@@ -61,12 +62,14 @@ def process_adata(adata: sc.AnnData,
     # We also perform basic visualization 
     sc.pp.scale(adata)
     if dr_method == "umap":
-        sc.pp.pca(adata)
-        sc.pp.neighbors(adata)    
-        sc.tl.umap(adata)
+        with process_time_ram("Computing UMAP") as ctm:
+            sc.pp.pca(adata)
+            sc.pp.neighbors(adata)    
+            sc.tl.umap(adata)
     else:
-        sc.pp.pca(adata, n_comps=2)
-        sc.pp.neighbors(adata) 
+        with process_time_ram("Computing PCA") as ctm:
+            sc.pp.pca(adata, n_comps=2)
+            sc.pp.neighbors(adata) 
     # Save the embedding to its own key
     # Note that X_umap always refers to the latest one 
     # Can use sc.pl.embedding(adata, basis="X_umap_???", color="cell_type") to plot specific embedding 
@@ -346,7 +349,7 @@ def extract_layer_num(layer: str) -> int:
     
 
 def generate_count_patches(adata: sc.AnnData,
-                           tx_to_reassign: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
+                           tx_to_reassign: pl.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """Based on the transcript reassignment, generate patches to update the current count matrix 
 
     Parameters
@@ -366,13 +369,13 @@ def generate_count_patches(adata: sc.AnnData,
     counts_to_subtract = pd.DataFrame(0, index=adata.obs_names, columns=adata.var_names)
     counts_to_add = pd.DataFrame(0, index=adata.obs_names, columns=adata.var_names)
     # For removal, we for each cell count how many genes occured 
-    cell_to_remove = tx_to_reassign.groupby(by=['cell_id', "gene"], as_index=False).size()
+    cell_to_remove = tx_to_reassign.group_by(['cell_id', "gene"]).len().to_pandas()
     # For addition, we for each cell in the neighbor count how many genes occured 
-    cell_to_add = tx_to_reassign.groupby(by=['neighbor_cell_id', "gene"], as_index=False).size()
+    cell_to_add = tx_to_reassign.group_by(['neighbor_cell_id', "gene"]).len().to_pandas()
     cell_to_add.rename(columns={"neighbor_cell_id": "cell_id"}, inplace=True)
     # Transform the dataframe from long to wide 
-    subtract_patch = pd.pivot(cell_to_remove, values="size", columns="gene", index='cell_id').fillna(0)
-    add_patch = pd.pivot(cell_to_add, values="size", columns="gene", index='cell_id').fillna(0)
+    subtract_patch = pd.pivot(cell_to_remove, values="len", columns="gene", index='cell_id').fillna(0)
+    add_patch = pd.pivot(cell_to_add, values="len", columns="gene", index='cell_id').fillna(0)
     # The update the find matching rows and columns 
     counts_to_subtract.update(subtract_patch)
     counts_to_add.update(add_patch)
@@ -382,7 +385,7 @@ def generate_count_patches(adata: sc.AnnData,
 
 def make_reassignment_adata(adata: sc.AnnData,
                             layer: str,
-                            tx_to_reassign: pd.DataFrame,
+                            tx_to_reassign: pl.DataFrame,
                             trial_layer: Optional[str]=None,
                             dr_method: str='pca') -> sc.AnnData:
     """Make the count adjustment on the adata alone 

@@ -496,6 +496,7 @@ class misc(nn.Module):
         criteria : dict, optional
             A dictionary of criterion name-criterion pair. For random assignment, the criterion should be a string, by default {"threshold": 0.5, "random": "random"}
         """
+        adata_obs = pl.from_pandas(self.adata.obs["cell_type"], include_index=True)
         for criterion_name in tqdm(criteria): 
             tx_to_reassign = self.intf_tx.group_by("molecule_id").agg(pl.all().sort_by("reassign_probs", descending=False).last())
             tx_to_reassign = tx_to_reassign.drop(['prior_distance_feature',
@@ -507,13 +508,13 @@ class misc(nn.Module):
             else:
                 reassign = (tx_to_reassign['reassign_probs']>criterion).to_numpy().astype(int)
             tx_to_reassign = tx_to_reassign.with_columns(pl.Series(name='reassign', values=reassign))
-            tx_to_reassign = tx_to_reassign.filter(pl.col("reassign")==1).drop("reassign").to_pandas()
+            tx_to_reassign = tx_to_reassign.filter(pl.col("reassign")==1).drop("reassign")
             
-            tx_to_reassign = tx_to_reassign.merge(self.adata.obs[['cell_type']].rename(columns={"cell_type": "from_cell_type"}),
+            tx_to_reassign = tx_to_reassign.join(adata_obs[['cell_type']].rename({"cell_type": "from_cell_type"}),
                                                  how='left', left_on='cell_id', right_index=True)
-            tx_to_reassign = tx_to_reassign.merge(self.adata.obs[['cell_type']].rename(columns={"cell_type": "to_cell_type"}),
+            tx_to_reassign = tx_to_reassign.join(adata_obs[['cell_type']].rename({"cell_type": "to_cell_type"}),
                                                  how='left', left_on='neighbor_cell_id', right_index=True)
-            tx_to_reassign.drop(columns=["cell_type", "neighbor_celltype"], inplace=True)
+            tx_to_reassign = tx_to_reassign.drop(["cell_type", "neighbor_celltype"])
             
             trial_layer = self.current_layer+"_"+criterion_name
             # For each criterion, we store the update 
@@ -525,10 +526,9 @@ class misc(nn.Module):
                                                 tx_to_reassign=tx_to_reassign,
                                                 trial_layer=trial_layer,
                                                 dr_method=self.import_data_par['dr_method'])
-            tx_to_reassign.rename(columns={"cell_id": "from_cell_id",
-                                           "neighbor_cell_id": "to_cell_id"},
-                                  inplace=True)
-            self.tx_to_reassign_dict[trial_layer] = tx_to_reassign.copy()
+            tx_to_reassign = tx_to_reassign.rename({"cell_id": "from_cell_id",
+                                                    "neighbor_cell_id": "to_cell_id"})
+            self.tx_to_reassign_dict[trial_layer] = tx_to_reassign.to_pandas().copy()
         
     def save_model(self,
                    dir_name: str,
