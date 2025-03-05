@@ -509,13 +509,10 @@ class misc(nn.Module):
             tx_to_reassign = tx_to_reassign.with_columns(pl.Series(name='reassign', values=reassign))
             tx_to_reassign = tx_to_reassign.filter(pl.col("reassign")==1).drop("reassign").to_pandas()
             
-            tx_to_reassign = tx_to_reassign.join(self.adata.obs[['cell_type']].rename(columns={"cell_type": "from_cell_type"}),
+            tx_to_reassign = tx_to_reassign.merge(self.adata.obs[['cell_type']].rename(columns={"cell_type": "from_cell_type"}),
                                                  how='left', left_on='cell_id', right_index=True)
-            tx_to_reassign = tx_to_reassign.join(self.adata.obs[['cell_type']].rename(columns={"cell_type": "to_cell_type"}),
+            tx_to_reassign = tx_to_reassign.merge(self.adata.obs[['cell_type']].rename(columns={"cell_type": "to_cell_type"}),
                                                  how='left', left_on='neighbor_cell_id', right_index=True)
-            tx_to_reassign.rename(columns={"cell_id": "from_cell_id",
-                                           "neighbor_cell_id": "to_cell_id"},
-                                  inplace=True)
             tx_to_reassign.drop(columns=["cell_type", "neighbor_celltype"], inplace=True)
             
             trial_layer = self.current_layer+"_"+criterion_name
@@ -523,12 +520,15 @@ class misc(nn.Module):
             # And make assignment to the count matrix 
             # This will also compute UMAP by default
             # We do not actually reassign transcript at this stage 
-            self.tx_to_reassign_dict[trial_layer] = tx_to_reassign.copy()
             self.adata = make_reassignment_adata(adata=self.adata,
                                                 layer=self.current_layer,
                                                 tx_to_reassign=tx_to_reassign,
                                                 trial_layer=trial_layer,
                                                 dr_method=self.import_data_par['dr_method'])
+            tx_to_reassign.rename(columns={"cell_id": "from_cell_id",
+                                           "neighbor_cell_id": "to_cell_id"},
+                                  inplace=True)
+            self.tx_to_reassign_dict[trial_layer] = tx_to_reassign.copy()
         
     def save_model(self,
                    dir_name: str,
