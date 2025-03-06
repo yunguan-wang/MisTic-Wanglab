@@ -261,7 +261,7 @@ def distance_feature(adata: sc.AnnData,
     ########################################################
     ########################################################
     with process_time_ram("Refine overall min with different type rank") as ctm:
-        min_distance = intf_tx.filter(pl.col("neighbor_distance_rank")<=0.1).select(['molecule_id', 'cell_id', 'neighbor_cell_id'])
+        min_distance = intf_tx.filter(pl.col("neighbor_distance_rank")<=0.9).select(['molecule_id', 'cell_id', 'neighbor_cell_id'])
         
         min_distance = min_distance.with_columns(
             pl.Series(name="neighbor_distance", values=distance(tx_metadata.loc[min_distance['molecule_id'].to_list(),'tx_geom'].values,
@@ -271,7 +271,7 @@ def distance_feature(adata: sc.AnnData,
         min_distance = min_distance.rename({'literal': "neighbor_index"})
         
         patch = min_distance.with_columns(
-            (pl.col("neighbor_distance").rank(descending=False)/pl.col("neighbor_distance").count()*0.1)
+            (pl.col("neighbor_distance").rank(descending=False)/pl.col("neighbor_distance").count()*0.9)
             .over("cell_id").alias("neighbor_distance_rank"))
         intf_tx = intf_tx.update(patch, on=["molecule_id", "cell_id", "neighbor_cell_id"])
     ########################################################
