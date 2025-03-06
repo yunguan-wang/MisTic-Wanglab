@@ -87,8 +87,7 @@ def trial_patch_coords(adata: sc.AnnData,
 def generate_patch_coords(adata: sc.AnnData,
                           intf_tx: pl.DataFrame,
                           percent_cell_per_patch: float=0.1,
-                          num_overlap: int=7,
-                          neighbor_index: int=0) -> list:
+                          num_overlap: int=7) -> list:
     """Generate patches represented by their coordinates 
 
     Parameters
@@ -106,7 +105,7 @@ def generate_patch_coords(adata: sc.AnnData,
     
     n_cells = adata.X.shape[0]
     n_genes = adata.uns['n_genes']
-    interface_cells = intf_tx.filter(pl.col('neighbor_index')==neighbor_index)['cell_id'].unique().to_list()
+    interface_cells = intf_tx['cell_id'].unique().to_list()
     # The maximum number of transcripts detected within a cell 
     max_tx = adata.layers['counts_0'].sum(axis=1).max()
     # As the model parameters are almost negligible we focus on the data 
@@ -178,6 +177,7 @@ def load_patch(adata_w_leiden_xy: pl.DataFrame,
     cell_patch = cell_patch.with_columns(pl.Series(name="row_index", values=[i for i in range(cell_patch.shape[0])]))
     
     # Make sure all cells as well as their neighbors are within the patch 
+    
     tx_patch = intf_tx.filter((pl.col("cell_id").is_in(cell_patch['cell_id'])) & \
                             (pl.col("neighbor_cell_id").is_in(cell_patch['cell_id'])))
     # Generate three indices to be used for adjusting gene counts 

@@ -5,7 +5,6 @@ import scanpy as sc
 import geopandas as gpd
 from geopandas import read_parquet
 import pandas as pd
-import polars as pl
 # Data manipulation 
 import re 
 import numpy as np
@@ -36,8 +35,7 @@ def process_time_ram(message: str=""):
 
 
 def process_adata(adata: sc.AnnData,
-                layer: str,
-                dr_method: str) -> sc.AnnData:
+                layer: str) -> sc.AnnData:
     """Generate UMAP embedding for an AnnData 
 
     Parameters
@@ -60,20 +58,15 @@ def process_adata(adata: sc.AnnData,
     sc.pp.normalize_total(adata, target_sum=1000)
     sc.pp.log1p(adata)
     # We also perform basic visualization 
+    print("UMAP")
     sc.pp.scale(adata)
-    if dr_method == "umap":
-        with process_time_ram("Computing UMAP") as ctm:
-            sc.pp.pca(adata)
-            sc.pp.neighbors(adata)    
-            sc.tl.umap(adata)
-    else:
-        with process_time_ram("Computing PCA") as ctm:
-            sc.pp.pca(adata, n_comps=2)
-            sc.pp.neighbors(adata) 
+    sc.pp.pca(adata)
+    sc.pp.neighbors(adata)
+    sc.tl.umap(adata)
     # Save the embedding to its own key
     # Note that X_umap always refers to the latest one 
-    # Can use sc.pl.embedding(adata, basis="X_umap_???", color="cell_type") to plot specific embedding 
-    adata.obsm['X_'+dr_method+'_'+layer] = adata.obsm["X_"+dr_method].copy()
+    # Can use sc.pl.embedding(adata, basis="X_umap_???") to plot specific embedding 
+    adata.obsm['X_umap_'+layer] = adata.obsm["X_umap"].copy()
     return adata
 
 
@@ -89,7 +82,7 @@ def import_data(cell_metadata: Union[str, pd.DataFrame],
                 cell_col: str='cell_id',
                 celltype_col: Optional[str]=None,
                 leiden_res: float=1,
-                dr_method: str="umap"
+                preprocess: bool=True,
                 ) -> Tuple[sc.AnnData, gpd.GeoDataFrame, gpd.GeoDataFrame]:
     """Read in the four pieces information needed for subsequent analysis: 
     cell-by-gene counts, cell metadata, cell boundary information, and transcript information. Some 
@@ -127,7 +120,7 @@ def import_data(cell_metadata: Union[str, pd.DataFrame],
         if isinstance(cell_metadata, str) and ("csv" in os.path.splitext(cell_metadata)[1]):
             cell_meta = pd.read_csv(cell_metadata, index_col=0)
         elif isinstance(cell_metadata, pd.DataFrame):
-            cell_meta = cell_metadata.copy()
+            cell_meta = cell_metadata
         else: 
             raise TypeError("Only .csv file or pandas dataframe is allowed")
         cell_meta.index.rename(name='cell_id', inplace=True)
@@ -139,7 +132,7 @@ def import_data(cell_metadata: Union[str, pd.DataFrame],
         if isinstance(cell_boundary_polygons, str) and ("parquet" in os.path.splitext(cell_boundary_polygons)[1]):
             cell_coords = read_parquet(cell_boundary_polygons)
         elif isinstance(cell_boundary_polygons, gpd.GeoDataFrame):
-            cell_coords = cell_boundary_polygons.copy()
+            cell_coords = cell_boundary_polygons
         else: 
             raise TypeError("Only .parquet file or geopandas dataframe is allowed")
         cell_coords.index.rename(name='cell_id', inplace=True)
@@ -159,17 +152,13 @@ def import_data(cell_metadata: Union[str, pd.DataFrame],
         elif isinstance(detected_transcripts, str) and ("csv" in os.path.splitext(detected_transcripts)[1]):
             tx_metadata = pd.read_csv(detected_transcripts, index_col=0)    
         elif isinstance(detected_transcripts, pd.DataFrame) or isinstance(detected_transcripts, gpd.GeoDataFrame):
-            tx_metadata = detected_transcripts.copy()
+            tx_metadata = detected_transcripts
         else: 
             raise TypeError("Only .parquet/.csv file or geopandas/pandas dataframe is allowed")
 
-        tx_metadata.rename(columns={tx_x_col: "global_x",
-                                    tx_y_col: "global_y"},
-                           inplace=True, errors='raise')
-        
         if not isinstance(tx_metadata, gpd.GeoDataFrame):
             tx_metadata = gpd.GeoDataFrame(tx_metadata, 
-                                        geometry=gpd.points_from_xy(tx_metadata["global_x"], tx_metadata["global_y"]))
+                                        geometry=gpd.points_from_xy(tx_metadata[tx_x_col], tx_metadata[tx_y_col]))
         
         tx_metadata.reset_index(drop=True, inplace=True)
         tx_metadata.index = "tx_" + tx_metadata.index.astype(str)
@@ -190,7 +179,7 @@ def import_data(cell_metadata: Union[str, pd.DataFrame],
             if isinstance(cell_by_gene_counts, str) and ("csv" in os.path.splitext(cell_by_gene_counts)[1]):
                 counts = pd.read_csv(cell_by_gene_counts, index_col=0)
             elif isinstance(cell_by_gene_counts, pd.DataFrame):
-                counts = cell_by_gene_counts.copy()
+                counts = cell_by_gene_counts
             else: 
                 raise TypeError("Only .csv file or pandas dataframe is allowed")
         else: 
@@ -221,11 +210,11 @@ def import_data(cell_metadata: Union[str, pd.DataFrame],
         adata.layers['counts_0'] = adata.X.copy()
         adata.raw = adata.copy()
     
-    # Then we perform basic normalization and transformation 
-    with process_time_ram("Successfully read in data. Performing basic transformation") as ctm:
-        adata = process_adata(adata=adata,
-                            layer="counts_0",
-                            dr_method=dr_method)
+    if preprocess:
+        # Then we perform basic normalization and transformation 
+        with process_time_ram("Successfully read in data. Performing basic transformation") as ctm:
+            adata = process_adata(adata=adata,
+                                layer="counts_0")
     # And we will use leiden to perform cell clustering
     if celltype_col is not None:
         with process_time_ram("Assigning pre-existing cell typing info from metadata.") as ctm:
@@ -246,7 +235,6 @@ def import_data(cell_metadata: Union[str, pd.DataFrame],
         adata.uns['cell_type_leiden_map'].rename(columns={"cell_type": "cell_type_name",
                                                         "leiden": "cell_type_index"},
                                                 inplace=True)
-        adata.uns['dr_method'] = dr_method
         adata.uns['centroid_x_min'] = adata.obs['x'].min()
         adata.uns['centroid_x_max'] = adata.obs['x'].max()
         adata.uns['centroid_y_min'] = adata.obs['y'].min()
@@ -349,7 +337,7 @@ def extract_layer_num(layer: str) -> int:
     
 
 def generate_count_patches(adata: sc.AnnData,
-                           tx_to_reassign: pl.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
+                           tx_to_reassign: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """Based on the transcript reassignment, generate patches to update the current count matrix 
 
     Parameters
@@ -369,13 +357,13 @@ def generate_count_patches(adata: sc.AnnData,
     counts_to_subtract = pd.DataFrame(0, index=adata.obs_names, columns=adata.var_names)
     counts_to_add = pd.DataFrame(0, index=adata.obs_names, columns=adata.var_names)
     # For removal, we for each cell count how many genes occured 
-    cell_to_remove = tx_to_reassign.group_by(['cell_id', "gene"]).len().to_pandas()
+    cell_to_remove = tx_to_reassign.groupby(by=['cell_id', "gene"], as_index=False).size()
     # For addition, we for each cell in the neighbor count how many genes occured 
-    cell_to_add = tx_to_reassign.group_by(['neighbor_cell_id', "gene"]).len().to_pandas()
+    cell_to_add = tx_to_reassign.groupby(by=['neighbor_cell_id', "gene"], as_index=False).size()
     cell_to_add.rename(columns={"neighbor_cell_id": "cell_id"}, inplace=True)
     # Transform the dataframe from long to wide 
-    subtract_patch = pd.pivot(cell_to_remove, values="len", columns="gene", index='cell_id').fillna(0)
-    add_patch = pd.pivot(cell_to_add, values="len", columns="gene", index='cell_id').fillna(0)
+    subtract_patch = pd.pivot(cell_to_remove, values="size", columns="gene", index='cell_id').fillna(0)
+    add_patch = pd.pivot(cell_to_add, values="size", columns="gene", index='cell_id').fillna(0)
     # The update the find matching rows and columns 
     counts_to_subtract.update(subtract_patch)
     counts_to_add.update(add_patch)
@@ -385,9 +373,9 @@ def generate_count_patches(adata: sc.AnnData,
 
 def make_reassignment_adata(adata: sc.AnnData,
                             layer: str,
-                            tx_to_reassign: pl.DataFrame,
+                            tx_to_reassign: pd.DataFrame,
                             trial_layer: Optional[str]=None,
-                            dr_method: str='pca') -> sc.AnnData:
+                            preprocess: bool=True) -> sc.AnnData:
     """Make the count adjustment on the adata alone 
     This will not alter the tx information 
 
@@ -417,7 +405,8 @@ def make_reassignment_adata(adata: sc.AnnData,
         adata.layers[trial_layer] = adata.layers[layer]+counts_to_add-counts_to_subtract 
         if np.any(adata.layers[trial_layer]<0):
             raise Exception("Negative values generated. This might be due inconsistency between the count matrix and the tx data.")
-        adata = process_adata(adata=adata, layer=trial_layer, dr_method=dr_method)
+        if preprocess:
+            adata = process_adata(adata=adata, layer=trial_layer)
     return adata
 
 

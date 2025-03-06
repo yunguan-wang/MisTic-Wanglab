@@ -128,8 +128,8 @@ def expression_feature(adata: sc.AnnData,
     # 
     overall_log2_mean = np.log2(adata.to_df(layer).mean(axis=0) + 1).to_frame().T
     
-    expression_dist_tree = KDTree(adata.obsm['X_'+adata.uns['dr_method']+'_'+layer])
-    _, adj_ind = expression_dist_tree.query(adata.obsm['X_'+adata.uns['dr_method']+'_'+layer], k=50, workers=-1)
+    expression_dist_tree = KDTree(adata.obsm['X_umap_'+layer])
+    _, adj_ind = expression_dist_tree.query(adata.obsm['X_umap_'+layer], k=50, workers=-1)
     
     adj = pl.from_numpy(adj_ind).with_columns(pl.Series(name="cell_id",
                                                 values=adata.obs_names)).unpivot(index="cell_id").drop("variable")
@@ -155,6 +155,22 @@ def expression_feature(adata: sc.AnnData,
     prior_exp_1vR_df = log2fc_feature.unpivot(index="cell_id")
     prior_exp_1vR_df = prior_exp_1vR_df.rename({"value": "prior_rest_self_exp_feature",
                                                 "variable": 'gene'})
+    
+    # adj = pd.DataFrame(adj_ind, index=adata.obs_names).melt(ignore_index=False).drop(columns=['variable'])
+    # adj.loc[:,'n'] = adata.obs_names[adj['value']]
+    # adj.drop(columns=['value'], inplace=True)
+    # adj = adj.merge(adata.to_df(layer), how="left", left_on="n", right_index=True)
+    # adj = adj.drop(columns=['n']).groupby(by="cell_id").mean()
+    
+    # log2fc = np.log2(adj+1).sub(overall_log2_mean.values, axis=1)
+    # log2fc_rank = log2fc.rank(axis=1, pct=True, ascending=False)*0.999
+    # log2fc_feature = np.log(log2fc_rank/(1-log2fc_rank))
+    # log2fc_feature['cell_id'] = log2fc_feature.index
+    
+    # prior_exp_1vR_df = pd.melt(log2fc_feature, id_vars="cell_id")
+    # prior_exp_1vR_df.rename(columns={"value": "prior_rest_self_exp_feature",
+    #                                 "variable": 'gene'}, inplace=True)
+    # prior_exp_1vR_df = pl.from_pandas(prior_exp_1vR_df)
 
     return exp_1vR_df, prior_exp_1vR_df
 
@@ -164,7 +180,7 @@ def distance_feature(adata: sc.AnnData,
                     cell_coords: gpd.GeoDataFrame,
                     mask_distance: pd.DataFrame, 
                     mask_dist_cutoff: float=5,
-                    nearest: int=1) -> pl.DataFrame:
+                    nearest: int=1) -> dict:
     """Depending on the cell-cell distance computed based on cell masks, this function computes 
     the distances of all the transcripts of a cell to the nearest neighboring cell and then computes 
     the distance ratio 
@@ -206,8 +222,8 @@ def distance_feature(adata: sc.AnnData,
     with process_time_ram("Extracting transcripts") as ctm:
         # Directly indexing a huge pandas df would take a long time 
         # We switch to polars to speed it up
-        intf_tx = pl.from_pandas(tx_metadata[['molecule_id', 'cell_id', "gene", "global_x", "global_y"]])
-        intf_tx = intf_tx.filter(pl.col("cell_id").is_in(valid_cells))
+        all_intf_tx = pl.from_pandas(tx_metadata[['molecule_id', 'cell_id', "gene", "global_x", "global_y"]])
+        all_intf_tx = all_intf_tx.filter(pl.col("cell_id").is_in(valid_cells))
     ########################################################
     ########################################################
     with process_time_ram("Find transcripts' NNs based on cell centroids") as ctm:
@@ -218,73 +234,101 @@ def distance_feature(adata: sc.AnnData,
         # the other two, one might be of the same type the other might be of a different type 
         kn = 5
         centroid_tree = KDTree(adata.obs[['x', 'y']])
-        dd, ii = centroid_tree.query(intf_tx[["global_x", "global_y"]], k=kn, workers=-1)
+        dd, ii = centroid_tree.query(all_intf_tx[["global_x", "global_y"]], k=kn, workers=-1)
     ########################################################
     ########################################################
     with process_time_ram("Add NN info") as ctm:
-        intf_tx = intf_tx.drop(["global_x", "global_y"])
+        all_intf_tx = all_intf_tx.drop(["global_x", "global_y"])
         # repeat each row kn times 
-        intf_tx = intf_tx.select(pl.all().repeat_by(kn).flatten())
+        all_intf_tx = all_intf_tx.select(pl.all().repeat_by(kn).flatten())
         
-        intf_tx = intf_tx.with_columns(pl.Series(name = "neighbor_cell_id", values=adata.obs_names[ii.ravel()].values))
-        intf_tx = intf_tx.with_columns(pl.Series(name = "neighbor_distance", values=dd.ravel()))
+        all_intf_tx = all_intf_tx.with_columns(pl.Series(name = "neighbor_cell_id", values=adata.obs_names[ii.ravel()].values))
+        all_intf_tx = all_intf_tx.with_columns(pl.Series(name = "neighbor_distance", values=dd.ravel()))
         
-        intf_tx = intf_tx.filter(pl.col("cell_id")!=pl.col("neighbor_cell_id"))
+        all_intf_tx = all_intf_tx.filter(pl.col("cell_id")!=pl.col("neighbor_cell_id"))
         
-        intf_tx = intf_tx.join(interface, how='left', on=["cell_id", "neighbor_cell_id"])
-        intf_tx = intf_tx.drop_nulls()
+        all_intf_tx = all_intf_tx.join(interface, how='left', on=["cell_id", "neighbor_cell_id"])
+        all_intf_tx = all_intf_tx.drop_nulls()
     ########################################################
     ########################################################
-    with process_time_ram("Computing overall min") as ctm:
-        min_distance = intf_tx.group_by(['molecule_id']).agg(pl.min("neighbor_distance"))
-        min_distance = min_distance.rename({"neighbor_distance": "min_neighbor_distance"})   
+    with process_time_ram("Add neighbor index") as ctm:
+        all_intf_tx = all_intf_tx.sort("molecule_id", "neighbor_distance").with_columns(pl.int_range(pl.len()).over("molecule_id"))
+        all_intf_tx = all_intf_tx.rename({'literal': "neighbor_index"})
+        intf_tx_dict = {"intf_tx{}".format(i): all_intf_tx.filter(pl.col("neighbor_index")>=i) for i in range(nearest)}
     ########################################################
     ########################################################
-    with process_time_ram("Computing min with different cell type") as ctm:
-        intf_tx = intf_tx.filter(pl.col("cell_type")!=pl.col("neighbor_celltype"))
-        
-        intf_tx = intf_tx.sort("molecule_id", "neighbor_distance").with_columns(pl.int_range(pl.len()).over("molecule_id"))
-        intf_tx = intf_tx.rename({'literal': "neighbor_index"})
-        intf_tx = intf_tx.filter(pl.col("neighbor_index")<nearest)
-        
-        intf_tx = intf_tx.join(min_distance, how='left', on=['molecule_id'])
-    ########################################################
-    ########################################################
-    with process_time_ram("Computing percentile ranks by cell") as ctm:
-        intf_tx = intf_tx.with_columns(
-            (pl.col("neighbor_distance").rank(descending=False)/pl.col("neighbor_distance").count()*0.999)
-            .over("cell_id").alias("neighbor_distance_rank"))
-        
-        intf_tx = intf_tx.with_columns(
-            (pl.col("min_neighbor_distance").rank(descending=False)/pl.col("min_neighbor_distance").count()*0.999)
-            .over("cell_id").alias("min_neighbor_distance_rank"))
-    ########################################################
-    ########################################################
-    with process_time_ram("Refine overall min with different type rank") as ctm:
-        min_distance = intf_tx.filter(pl.col("neighbor_distance_rank")<=0.9).select(['molecule_id', 'cell_id', 'neighbor_cell_id'])
-        
-        min_distance = min_distance.with_columns(
-            pl.Series(name="neighbor_distance", values=distance(tx_metadata.loc[min_distance['molecule_id'].to_list(),'tx_geom'].values,
-                                                                cell_coords.loc[min_distance['neighbor_cell_id'].to_list(),"cell_boundary_geom"].values))
-        )
-        min_distance = min_distance.sort("molecule_id", "neighbor_distance").with_columns(pl.int_range(pl.len()).over("molecule_id"))
-        min_distance = min_distance.rename({'literal': "neighbor_index"})
-        
-        patch = min_distance.with_columns(
-            (pl.col("neighbor_distance").rank(descending=False)/pl.col("neighbor_distance").count()*0.9)
-            .over("cell_id").alias("neighbor_distance_rank"))
-        intf_tx = intf_tx.update(patch, on=["molecule_id", "cell_id", "neighbor_cell_id"])
-    ########################################################
-    ########################################################
-    with process_time_ram("Generate final features") as ctm:
-        intf_tx = intf_tx.with_columns(
-            pl.Series(name='distance_feature', values=-np.log(intf_tx['neighbor_distance_rank']/(1-intf_tx['neighbor_distance_rank']))),
-            pl.Series(name='prior_distance_feature', values=-np.log(intf_tx['min_neighbor_distance_rank']/(1-intf_tx['min_neighbor_distance_rank']))))
-        
-        intf_tx = intf_tx.drop(["neighbor_distance","min_neighbor_distance", 
-                                "neighbor_distance_rank", "min_neighbor_distance_rank"])
+    for intf_tx_name, intf_tx in intf_tx_dict.items():
+        ########################################################
+        ########################################################
+        with process_time_ram("Computing overall min") as ctm:
+            min_distance = intf_tx.group_by(['molecule_id']).agg(pl.min("neighbor_distance"))
+            min_distance = min_distance.rename({"neighbor_distance": "min_neighbor_distance"}) 
+        ########################################################
+        ########################################################
+        with process_time_ram("Computing min with different cell type") as ctm:
+            intf_tx = intf_tx.filter(pl.col("cell_type")!=pl.col("neighbor_celltype"))
+            
+            intf_tx = intf_tx.sort("neighbor_distance")
+            
+            intf_tx = intf_tx.group_by(["molecule_id"], maintain_order=True).first()
+            intf_tx = intf_tx.join(min_distance, how='left', on=['molecule_id'])
+        ########################################################
+        ########################################################
+        with process_time_ram("Computing percentile ranks by cell") as ctm:
+            intf_tx = intf_tx.with_columns(
+                (pl.col("neighbor_distance").rank(descending=False)/pl.col("neighbor_distance").count()*0.999)
+                .over("cell_id").alias("neighbor_distance_rank"))
+            
+            intf_tx = intf_tx.with_columns(
+                (pl.col("min_neighbor_distance").rank(descending=False)/pl.col("min_neighbor_distance").count()*0.999)
+                .over("cell_id").alias("min_neighbor_distance_rank"))
+        ########################################################
+        ########################################################
+        with process_time_ram("Refine overall min rank") as ctm:
+            min_distance = intf_tx.filter(pl.col("min_neighbor_distance_rank")<=0.05).select(['molecule_id', 'cell_id'])
+            
+            min_distance = min_distance.join(interface, how='left', on='cell_id')
+            
+            min_distance = min_distance.with_columns(
+                pl.Series(name="neighbor_distance", values=distance(tx_metadata.loc[min_distance['molecule_id'].to_list(),'tx_geom'].values,
+                                                                    cell_coords.loc[min_distance['neighbor_cell_id'].to_list(),"cell_boundary_geom"].values))
+            )
+            patch = min_distance.group_by(['molecule_id', "cell_id"]).agg(pl.min("neighbor_distance"))
+            patch = patch.rename({"neighbor_distance": "min_neighbor_distance"})
+            patch = patch.with_columns(
+                (pl.col("min_neighbor_distance").rank(descending=False)/pl.col("min_neighbor_distance").count()*0.05)
+                .over("cell_id").alias("min_neighbor_distance_rank"))
+            intf_tx = intf_tx.update(patch, on=["molecule_id", "cell_id"])
+        ########################################################
+        ########################################################
+        with process_time_ram("Refine overall min with different type rank") as ctm:
+            min_distance = intf_tx.filter(pl.col("neighbor_distance_rank")<=0.05).select(['molecule_id', 'cell_id'])
+            
+            min_distance = min_distance.join(interface, how='left', on='cell_id')
+            
+            min_distance = min_distance.filter(pl.col("cell_type")!=pl.col("neighbor_celltype"))
+            
+            min_distance = min_distance.with_columns(
+                pl.Series(name="neighbor_distance", values=distance(tx_metadata.loc[min_distance['molecule_id'].to_list(),'tx_geom'].values,
+                                                                    cell_coords.loc[min_distance['neighbor_cell_id'].to_list(),"cell_boundary_geom"].values))
+            )
+            patch = min_distance.group_by(['molecule_id', "cell_id"]).agg(pl.min("neighbor_distance"))
+            patch = patch.with_columns(
+                (pl.col("neighbor_distance").rank(descending=False)/pl.col("neighbor_distance").count()*0.05)
+                .over("cell_id").alias("neighbor_distance_rank"))
+            intf_tx = intf_tx.update(patch, on=["molecule_id", "cell_id"])
+        ########################################################
+        ########################################################
+        with process_time_ram("Generate final features") as ctm:
+            intf_tx = intf_tx.with_columns(
+                pl.Series(name='distance_feature', values=-np.log(intf_tx['neighbor_distance_rank']/(1-intf_tx['neighbor_distance_rank']))),
+                pl.Series(name='prior_distance_feature', values=-np.log(intf_tx['min_neighbor_distance_rank']/(1-intf_tx['min_neighbor_distance_rank']))))
+            
+            intf_tx = intf_tx.drop(["neighbor_distance","min_neighbor_distance", 
+                                    "neighbor_distance_rank", "min_neighbor_distance_rank"])
+            intf_tx_dict[intf_tx_name] = intf_tx
     
-    return intf_tx
+    return intf_tx_dict
 
 
 def generate_feature(adata: sc.AnnData,
@@ -317,37 +361,39 @@ def generate_feature(adata: sc.AnnData,
         A dataframe containing information on the transcripts 
     """
     # Features based on distance 
-    intf_tx = distance_feature(adata=adata,
-                                tx_metadata=tx_metadata,
-                                cell_coords=cell_coords,
-                                mask_distance=mask_distance,
-                                mask_dist_cutoff=mask_dist_cutoff,
-                                nearest=nearest)
+    intf_tx_dict = distance_feature(adata=adata,
+                                    tx_metadata=tx_metadata,
+                                    cell_coords=cell_coords,
+                                    mask_distance=mask_distance,
+                                    mask_dist_cutoff=mask_dist_cutoff,
+                                    nearest=nearest)
     # Features based on differential analysis 
     exp_1vR_df, prior_exp_1vR_df = expression_feature(adata=adata,
                                                     layer=layer,
                                                     seed=seed)
     with process_time_ram("Combine features") as ctm:
         # Combine the two piceces of information 
-        intf_tx = intf_tx.join(exp_1vR_df, how='left',
-                                on=['cell_type', "gene"])
-        intf_tx = intf_tx.join(prior_exp_1vR_df, how='left',
-                            on=['cell_id', "gene"])
-        
-        intf_tx = intf_tx.join(exp_1vR_df.rename({"cell_type":"neighbor_celltype",
-                                "rest_self_exp_feature":"neighbor_rest_self_exp_feature"}), how='left',
-                                on=['neighbor_celltype', "gene"])
-        intf_tx = intf_tx.with_columns(pl.col("neighbor_rest_self_exp_feature").neg())
-        
-        intf_tx = intf_tx.join(prior_exp_1vR_df.rename({"prior_rest_self_exp_feature": "prior_neighbor_rest_self_exp_feature",
-                            "cell_id": "neighbor_cell_id"}), how='left',
-                            on=['neighbor_cell_id', "gene"])
-        intf_tx = intf_tx.with_columns(pl.col("prior_neighbor_rest_self_exp_feature").neg())
-        
-        intf_tx = intf_tx.rename({"neighbor_rest_self_exp_feature": "neighbor_exp_feature",
-                                "prior_neighbor_rest_self_exp_feature": "prior_neighbor_exp_feature",
-                                "rest_self_exp_feature": "exp_feature",
-                                "prior_rest_self_exp_feature": "prior_exp_feature"})
+        for intf_tx_name, intf_tx in intf_tx_dict.items():
+            intf_tx = intf_tx.join(exp_1vR_df, how='left',
+                                    on=['cell_type', "gene"])
+            intf_tx = intf_tx.join(prior_exp_1vR_df, how='left',
+                                on=['cell_id', "gene"])
+            
+            intf_tx = intf_tx.join(exp_1vR_df.rename({"cell_type":"neighbor_celltype",
+                                    "rest_self_exp_feature":"neighbor_rest_self_exp_feature"}), how='left',
+                                    on=['neighbor_celltype', "gene"])
+            intf_tx = intf_tx.with_columns(pl.col("neighbor_rest_self_exp_feature").neg())
+            
+            intf_tx = intf_tx.join(prior_exp_1vR_df.rename({"prior_rest_self_exp_feature": "prior_neighbor_rest_self_exp_feature",
+                                "cell_id": "neighbor_cell_id"}), how='left',
+                                on=['neighbor_cell_id', "gene"])
+            intf_tx = intf_tx.with_columns(pl.col("prior_neighbor_rest_self_exp_feature").neg())
+            
+            intf_tx = intf_tx.rename({"neighbor_rest_self_exp_feature": "neighbor_exp_feature",
+                                    "prior_neighbor_rest_self_exp_feature": "prior_neighbor_exp_feature",
+                                    "rest_self_exp_feature": "exp_feature",
+                                    "prior_rest_self_exp_feature": "prior_exp_feature"})
+            intf_tx_dict[intf_tx_name] = intf_tx
     
-    return intf_tx
+    return intf_tx_dict
     
