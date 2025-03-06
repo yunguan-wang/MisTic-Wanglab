@@ -37,9 +37,9 @@ class misc(nn.Module):
                 dr_method: str='umap',
                 max_centroid_dist: float=50,
                 mask_dist_cutoff: float=5,
-                nearest: int=1,
-                prior_50_reassign_prob: float=1e-6,
-                prior_5_reassign_prob: float=0.95,
+                nearest: int=3,
+                prior_50_reassign_prob: float=0.01,
+                prior_5_reassign_prob: float=0.99,
                 seed: int=42,
                 model_device: Optional[Union[str, torch.device]] = None) -> None:
         """Instantiate a misc object 
@@ -103,6 +103,7 @@ class misc(nn.Module):
         self.current_layer = "counts_0"
         self.mask_distance = None
         self.intf_tx = None
+        self.tx_reassign_info = None
         self.coord_list = {"neighbor{}".format(i): [] for i in range(nearest)}
         self.tx_to_reassign_dict = {}
         
@@ -124,8 +125,8 @@ class misc(nn.Module):
             self.model_device = model_device
         self.n_genes = None
         self.n_leiden = None
-        self.prior_50_reassign_prob = np.power(prior_50_reassign_prob, 1/3)
-        self.prior_5_reassign_prob = np.power(prior_5_reassign_prob, 1/3)
+        self.prior_50_reassign_prob = prior_50_reassign_prob
+        self.prior_5_reassign_prob = prior_5_reassign_prob
         
         self.reassign_coefficients = None
         self.prior_reassign_coefficients = None
@@ -219,7 +220,7 @@ class misc(nn.Module):
         parametrize.register_parametrization(self.reassign_coefficients, "weight", Positive())
         
         alpha_0 = -np.log(1/self.prior_50_reassign_prob-1+1e-20)
-        temp = -np.log(0.05/0.95)
+        temp = -np.log(0.05/0.95) 
         alpha_1 = (-np.log(1/self.prior_5_reassign_prob-1+1e-20) - alpha_0)/temp
         
         self.prior_reassign_coefficients = diagLinear(features=3, bias=True)
@@ -485,7 +486,7 @@ class misc(nn.Module):
                 reassign_probs = np.vstack([reassign_probs, reassign_probs_chunk.cpu().numpy()])
             # Store the computed probabilities 
             self.intf_tx = self.intf_tx.with_columns(pl.Series(name="reassign_probs", values=reassign_probs.squeeze(-1)))
-        
+            self.tx_reassign_info = self.intf_tx.group_by("molecule_id").agg(pl.all().sort_by("reassign_probs", descending=False).last())
         
     def reassign_tx(self,
                     criteria: dict={"threshold": 0.5}) -> None:
@@ -498,10 +499,9 @@ class misc(nn.Module):
         """
         adata_obs = pl.from_pandas(self.adata.obs["cell_type"], include_index=True)
         for criterion_name in tqdm(criteria): 
-            tx_to_reassign = self.intf_tx.group_by("molecule_id").agg(pl.all().sort_by("reassign_probs", descending=False).last())
-            tx_to_reassign = tx_to_reassign.drop(['prior_distance_feature',
-                                                'prior_exp_feature',
-                                                'prior_neighbor_exp_feature'])
+            tx_to_reassign = self.tx_reassign_info.drop(['prior_distance_feature',
+                                                        'prior_exp_feature',
+                                                        'prior_neighbor_exp_feature'])
             criterion = criteria[criterion_name]
             if isinstance(criterion, str):
                 reassign = np.random.binomial(n=1, p=tx_to_reassign['reassign_probs'])
