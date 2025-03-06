@@ -216,9 +216,6 @@ class misc(nn.Module):
 
         """
         
-        self.reassign_coefficients = diagLinear(features=3, bias=True)
-        parametrize.register_parametrization(self.reassign_coefficients, "weight", Positive())
-        
         alpha_0 = -np.log(1/self.prior_50_reassign_prob-1+1e-20)
         temp = -np.log(0.05/0.95) 
         alpha_1 = (-np.log(1/self.prior_5_reassign_prob-1+1e-20) - alpha_0)/temp
@@ -229,6 +226,10 @@ class misc(nn.Module):
         for param in self.prior_reassign_coefficients.parameters():
             param.requires_grad = False
         
+        self.reassign_coefficients = diagLinear(features=3, bias=True,
+                                                initial_weights=[np.log(np.exp(alpha_1)-1)]*3,
+                                                initial_bias=[alpha_0]*3)
+        parametrize.register_parametrization(self.reassign_coefficients, "weight", Positive())
         # The cell type coefficients takes the gene counts and outputs the logits for all the cell types 
         self.cell_type_coefficients = nn.Linear(in_features=self.n_genes, 
                                             out_features=self.n_leiden,

@@ -476,14 +476,22 @@ def binary_gumbel_softmax_sample(logits: torch.tensor,
 
 class diagLinear(nn.Module):
     def __init__(self, 
-                 features,
-                 bias):
+                 features: int,
+                 bias: bool=True,
+                 initial_weights: Optional[Union[np.array, list]]=None,
+                 initial_bias: Optional[Union[np.array, list]]=None):
         super().__init__()
         stdv = 1. / np.sqrt(features)
-        self.weight = nn.Parameter(torch.FloatTensor(1, features).uniform_(-stdv, stdv))
-        self.bias = torch.zeros_like(self.weight)
-        if bias:
-            self.bias = nn.Parameter(torch.FloatTensor(1, features).uniform_(-stdv, stdv))
+        if initial_weights is not None:
+            self.weight = nn.Parameter(torch.tensor(initial_weights, dtype=torch.float32).reshape(1, features))
+        else:
+            self.weight = nn.Parameter(torch.FloatTensor(1, features).uniform_(-stdv, stdv))
+        if initial_bias is not None:
+            self.bias = nn.Parameter(torch.tensor(initial_bias, dtype=torch.float32).reshape(1, features))
+        else: 
+            self.bias = torch.zeros_like(self.weight)
+            if bias:
+                self.bias = nn.Parameter(torch.FloatTensor(1, features).uniform_(-stdv, stdv))
             
     def forward(self, X):
         return X * self.weight + self.bias
