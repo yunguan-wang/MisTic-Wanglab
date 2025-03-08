@@ -511,10 +511,10 @@ class misc(nn.Module):
             tx_to_reassign = tx_to_reassign.with_columns(pl.Series(name='reassign', values=reassign))
             tx_to_reassign = tx_to_reassign.filter(pl.col("reassign")==1).drop("reassign")
             
-            tx_to_reassign = tx_to_reassign.join(adata_obs[['cell_type']].rename({"cell_type": "from_cell_type"}),
-                                                 how='left', left_on='cell_id', right_index=True)
-            tx_to_reassign = tx_to_reassign.join(adata_obs[['cell_type']].rename({"cell_type": "to_cell_type"}),
-                                                 how='left', left_on='neighbor_cell_id', right_index=True)
+            tx_to_reassign = tx_to_reassign.join(adata_obs.rename({"cell_type": "from_cell_type"}),
+                                                 how='left', left_on='cell_id', right_on="cell_id")
+            tx_to_reassign = tx_to_reassign.join(adata_obs.rename({"cell_type": "to_cell_type"}),
+                                                 how='left', left_on='neighbor_cell_id', right_on="cell_id")
             tx_to_reassign = tx_to_reassign.drop(["cell_type", "neighbor_celltype"])
             
             trial_layer = self.current_layer+"_"+criterion_name
