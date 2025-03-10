@@ -15,7 +15,7 @@ import torch.nn.functional as F
 import torch.nn.utils.parametrize as parametrize
 # Utility function 
 from MisC.utility import import_data, calculate_mask_distance, binary_gumbel_softmax_sample,\
-        make_reassignment_adata, diagLinear, Positive, JSONEncoder, even_split, process_time_ram
+        make_reassignment_adata, calibrate_threshold, diagLinear, Positive, JSONEncoder, even_split, process_time_ram
 from MisC.generate_tx_feature import generate_feature
 from MisC.data_loader import generate_patch_coords, load_patch
 # User entertainment
@@ -127,6 +127,7 @@ class misc(nn.Module):
         self.n_leiden = None
         self.prior_50_reassign_prob = prior_50_reassign_prob
         self.prior_5_reassign_prob = prior_5_reassign_prob
+        self.calibrator = None
         
         self.reassign_coefficients = None
         self.prior_reassign_coefficients = None
@@ -219,6 +220,9 @@ class misc(nn.Module):
         alpha_0 = -np.log(1/self.prior_50_reassign_prob-1+1e-20)
         temp = -np.log(0.05/0.95) 
         alpha_1 = (-np.log(1/self.prior_5_reassign_prob-1+1e-20) - alpha_0)/temp
+        
+        self.calibrator = calibrate_threshold(alpha_0=alpha_0,
+                                              alpha_1=alpha_1)
         
         self.prior_reassign_coefficients = diagLinear(features=3, bias=True)
         self.prior_reassign_coefficients.bias = nn.Parameter(torch.tensor([alpha_0]*3, dtype=torch.float32).reshape_as(self.prior_reassign_coefficients.bias))
@@ -486,9 +490,10 @@ class misc(nn.Module):
                 reassign_probs_chunk = torch.prod(reassign_probs_chunk, dim=1, keepdim=True)
                 reassign_probs = np.vstack([reassign_probs, reassign_probs_chunk.cpu().numpy()])
             # Store the computed probabilities 
-            self.intf_tx = self.intf_tx.with_columns(pl.Series(name="reassign_probs", values=reassign_probs.squeeze(-1)))
+            self.intf_tx = self.intf_tx.with_columns(pl.Series(name="reassign_probs_raw", values=reassign_probs.squeeze(-1)))
+            self.intf_tx = self.intf_tx.with_columns(pl.Series(name="reassign_probs", values=self.calibrator(reassign_probs.squeeze(-1))))
             self.tx_reassign_info = self.intf_tx.group_by("molecule_id").agg(pl.all().sort_by("reassign_probs", descending=False).last())
-        
+
     def reassign_tx(self,
                     criteria: dict={"threshold": 0.5}) -> None:
         """Generate transcript reassignment based on various criteria 
@@ -504,10 +509,8 @@ class misc(nn.Module):
                                                         'prior_exp_feature',
                                                         'prior_neighbor_exp_feature'])
             criterion = criteria[criterion_name]
-            if isinstance(criterion, str):
-                reassign = np.random.binomial(n=1, p=tx_to_reassign['reassign_probs'])
-            else:
-                reassign = (tx_to_reassign['reassign_probs']>criterion).to_numpy().astype(int)
+            
+            reassign = (tx_to_reassign['reassign_probs']>criterion).to_numpy().astype(int)
             tx_to_reassign = tx_to_reassign.with_columns(pl.Series(name='reassign', values=reassign))
             tx_to_reassign = tx_to_reassign.filter(pl.col("reassign")==1).drop("reassign")
             

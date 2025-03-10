@@ -104,7 +104,7 @@ Note that the function will create a `molecule_id` column for the `detected_tran
 >>> # Generate minibatches for SGD
 >>> m.patchfy_data()
 >>> m.initialize_parameters()
->>> m.training_loop(n_epochs=5)
+>>> m.training_loop(n_epochs=20)
 ```
 
 3. Transcript reassignment
@@ -113,7 +113,7 @@ We allow users to specify various criteria/cutoff for reassigning transcripts. T
 
 ```python
 >>> m.compute_reassign_probs()
->>> m.trial_reassign_tx(criteria={"threshold": 0.5})
+>>> m.reassign_tx(criteria={"threshold": 0.5})
 >>> m.save_model(dir_name="PATH/TO/DIRECTORY",
                     model_name="misc",
                     save_reassigning_result=True,
@@ -129,7 +129,7 @@ The ids contained in the `molecule_id` column correspond to the row numbers of t
 If you are also interested in the computed reassigning probabilities, you can assess them via 
 
 ```python
->>> m.intf_tx
+>>> m.tx_reassign_info
 ```
 
 We do not provide a function to save this polars dataframe as it could be large. However, recomputing it would not take too long. 

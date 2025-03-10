@@ -9,13 +9,14 @@ import polars as pl
 # Data manipulation 
 import re 
 import numpy as np
+from scipy.special import betainc
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from shapely import distance
 from scipy.spatial import KDTree
 # Typing and other info
-from typing import Optional, Union, Tuple
+from typing import Optional, Union, Tuple, Callable
 from time import perf_counter
 from contextlib import contextmanager
 import psutil
@@ -474,6 +475,17 @@ def binary_gumbel_softmax_sample(logits: torch.tensor,
         return y_soft
 
 
+def calibrate_threshold(alpha_0: np.array,
+                        alpha_1: np.array) -> np.array:
+    temp = np.power(0.5, 1/3)
+    logit = (np.log(temp/(1-temp+1e-20)+1e-20)-alpha_0)/(alpha_1+1e-20)
+    threshold = np.power(1-1/(1+np.exp(-logit)), 3)
+    a=np.log(0.5)/np.log(threshold+1e-20)
+    def calibrator(x: np.array) -> Callable:
+        return betainc(a, 1, x)
+    return calibrator
+
+
 class diagLinear(nn.Module):
     def __init__(self, 
                  features: int,
@@ -495,6 +507,7 @@ class diagLinear(nn.Module):
             
     def forward(self, X):
         return X * self.weight + self.bias
+
 
 class Positive(nn.Module):
     """This class is used to reparametrize model weights 
