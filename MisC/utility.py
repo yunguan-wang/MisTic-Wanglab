@@ -24,6 +24,13 @@ import psutil
 
 @contextmanager
 def process_time_ram(message: str=""):
+    """Monitor time taken as well as memory usage
+
+    Parameters
+    ----------
+    message : str, optional
+        The message to be printed, by default ""
+    """
     print("="*30)
     print(message)
     t1 = t2 = perf_counter()
@@ -47,7 +54,8 @@ def process_adata(adata: sc.AnnData,
         An AnnData to be updated 
     layer : str
         The layer upon which UMAP is computed 
-
+    dr_method: str
+        The dimension reduction method to be used. Either pca or umap
     Returns
     -------
     sc.AnnData
@@ -84,45 +92,74 @@ def import_data(cell_metadata: Union[str, pd.DataFrame],
                 cell_by_gene_counts: Optional[Union[str, pd.DataFrame]]=None,
                 cell_centroid_x_col: str='center_x',
                 cell_centroid_y_col: str='center_y',
+                celltype_col: Optional[str]=None,
                 tx_x_col: str='global_x',
                 tx_y_col: str='global_y',
                 gene_col: str='gene',
                 cell_col: str='cell_id',
-                celltype_col: Optional[str]=None,
                 leiden_res: float=1,
                 dr_method: str="umap"
                 ) -> Tuple[sc.AnnData, gpd.GeoDataFrame, gpd.GeoDataFrame]:
-    """Read in the four pieces information needed for subsequent analysis: 
-    cell-by-gene counts, cell metadata, cell boundary information, and transcript information. Some 
-    basic visualization and cell clustering will be performed. 
+    """Read in the three pieces information needed for subsequent analysis: 
+    cell metadata, cell boundary information, transcript information, and 
+    optionally cell-by-gene matrix. Some data curation will be performed 
 
     Parameters
     ----------
-    cell_by_gene_counts : Union[str, pd.DataFrame]
-        Either the path to the csv file or a pandas dataframe containing the cell-by-gene count matrix whose first 
-        column is assumed to contain the ID for each cell while the rest of the columns should be the transcript counts
-        for each cell. 
     cell_metadata : Union[str, pd.DataFrame]
         Either the path to the csv file or a pandas dataframe containing the metadata for each cell whose 
         first column is assumed to contain the ID for each cell. The information in the file/object should 
-        at least contain the xy coordinates of the centers of cells named center_x, and center_y, respectively.
-        If the users have already performed cell typing which is not required and will only be used for visualization,
-        the information can be stored here as a separate column: cell_type.
+        at least contain the xy coordinates of the centers of cells.
+        If the users have already performed cell typing which is not required,
+        the information can be stored here as a separate column.
     cell_boundary_polygons : Union[str, gpd.GeoDataFrame]
         Either the path to the parquet file or the geopandas GeoDataFrame containing the vertex information 
-        for each cell. The first column is assumed to be the IDs for cells. It should contain one column 'Geometry'
+        for each cell. The first column is assumed to be the IDs for cells. It should contain one column 
         that records the coordinates of the vertices.
     detected_transcripts : Union[str, pd.DataFrame, gpd.GeoDataFrame]
-        Either the path to the csv file or a pandas dataframe containing the information of the detected transcripts.
+        Either the path to the csv file or a pandas dataframe or geopandas GeoDataFrame containing the information of the detected transcripts.
         The first column is assumed to be some index. The information should contain the ID for a transcripte/molecule, 
-        the ID of the cell it belongs to, its xy coordinate named global_x, global_y respectively, and its gene information. 
+        the ID of the cell it belongs to, its xy coordinate, and its gene information. 
+    cell_by_gene_counts : Optional[Union[str, pd.DataFrame]], optional
+        Either the path to the csv file or a pandas dataframe containing the cell-by-gene count matrix whose first 
+        column is assumed to contain the ID for each cell while the rest of the columns should be the transcript counts
+        for each cell. If this is not provided, the cell-by-gene matrix will be constructed from the detected_transcripts.
+        If provided, the users are responsible for ensuring that the counts correspond to what's recorded in detected_transcripts , by default None
+    cell_centroid_x_col : str, optional
+        The column containing the x coordinates of cell centroids in cell metadata file, by default 'center_x'
+    cell_centroid_y_col : str, optional
+        The column containing the y coordinates of cell centroids in cell metadata file, by default 'center_y'
+    celltype_col : Optional[str], optional
+        The column containing the cell type information in cell metadata file, by default None
+    tx_x_col : str, optional
+        The column containing the x coordinates of transcript in detected transcript file, by default 'global_x'
+    tx_y_col : str, optional
+        The column containing the y coordinates of transcript in detected transcript file, by default 'global_y'
+    gene_col : str, optional
+        The column containing the gene information of transcript in detected transcript file, by default 'gene'
+    cell_col : str, optional
+        The column containing the cell id of transcript in detected transcript file, by default 'cell_id'
+    leiden_res : float, optional
+        The resolution for leiden clustering, by default 1
+    dr_method : str, optional
+        The dimension reduction method to be used. Either pca or umap, by default "umap"
 
     Returns
     -------
     Tuple[sc.AnnData, gpd.GeoDataFrame, gpd.GeoDataFrame]
-        An AnnData object containing the original counts and some metainformation. The detected transcript as well as the polygons. 
+        An AnnData object containing the original counts and some meta-information. 
+        The detected transcript as well as the polygons. 
+    Raises
+    ------
+    TypeError
+        cell_metadata has to be a .csv file or a pandas DataFrame 
+    TypeError
+        cell_boundary_polygons has to be a .parquet file or a geopandas DataFrame 
+    TypeError
+        detected_transcripts has to be a .csv/.parquet file or a pandas/geopandas DataFrame 
+    TypeError
+        cell_by_gene_counts has to be a .csv file or a pandas DataFrame 
     """
-
     # Cell metadata
     with process_time_ram("Processing cell metadata") as ctm:
         if isinstance(cell_metadata, str) and ("csv" in os.path.splitext(cell_metadata)[1]):
@@ -167,11 +204,11 @@ def import_data(cell_metadata: Union[str, pd.DataFrame],
         tx_metadata.rename(columns={tx_x_col: "global_x",
                                     tx_y_col: "global_y"},
                            inplace=True, errors='raise')
-        
+        # Convert pd.DataFrame to geopandas 
         if not isinstance(tx_metadata, gpd.GeoDataFrame):
             tx_metadata = gpd.GeoDataFrame(tx_metadata, 
                                         geometry=gpd.points_from_xy(tx_metadata["global_x"], tx_metadata["global_y"]))
-        
+        # All index will be reset
         tx_metadata.reset_index(drop=True, inplace=True)
         tx_metadata.index = "tx_" + tx_metadata.index.astype(str)
         tx_metadata['molecule_id'] = tx_metadata.index
@@ -195,6 +232,7 @@ def import_data(cell_metadata: Union[str, pd.DataFrame],
             else: 
                 raise TypeError("Only .csv file or pandas dataframe is allowed")
         else: 
+            # Construct cell-by-gene from detected transcripts 
             counts = tx_metadata.groupby(['cell_id', "gene"],
                                         as_index=False)['molecule_id'].count()
             counts = pd.pivot(counts, values='molecule_id', columns="gene", index='cell_id').fillna(0)
@@ -267,11 +305,11 @@ def calculate_mask_distance(adata: sc.AnnData,
     Parameters
     ----------
     adata : sc.AnnData
-        The AnnData object containing cell metainformation
+        The AnnData object containing cell meta-information
     cell_coords : gpd.GeoDataFrame
         The geodataframe recording the vertices of all the cells 
     max_centroid_dist : float, optional
-        The threshold on cell-cell centroid distances beyond which we do not consider two cells being neighbors, by default 15
+        The threshold on cell-cell centroid distances beyond which we do not consider two cells being neighbors, by default 50
 
     Returns
     -------
@@ -284,13 +322,13 @@ def calculate_mask_distance(adata: sc.AnnData,
         # As computing mask distances between all pairs of cells would take too long
         # we use the centroid distance to filter out the majority of the cells 
         # However, direct computation would consume a huge chunk of memory. Therefore, we use KDTree to 
-        # find nearest neighbors. Currently, the number is set to 10 with an upper bound 
+        # find nearest neighbors. Currently, the number is set to 25 with an upper bound 
         # 
         centroid_dist_tree = KDTree(adata.obs[['x','y']])
         # The distance is sorted 
         _, adj_ind = centroid_dist_tree.query(adata.obs[['x','y']], k=25, 
                                             distance_upper_bound=max_centroid_dist, workers=-1)
-        # This will directly give us cells and their at most 10 NNs
+        # This will directly give us cells and their at most 25 NNs
         # However, the adj_ind is the numeric index (row number)
         adj = pd.DataFrame(adj_ind, index=adata.obs_names).melt(ignore_index=False).drop(columns=['variable'])
         # Filter out values due to upper bound 
@@ -331,7 +369,6 @@ def even_split(array: np.array,
     return np.array_split(array, np.ceil(array.shape[0] / chunk_size), axis=0)
 
 
-
 def extract_layer_num(layer: str) -> int:
     """Extracts the layer number 
     It extracts all the number in the layer string but only returns the first one
@@ -357,7 +394,7 @@ def generate_count_patches(adata: sc.AnnData,
     ----------
     adata : sc.AnnData
         An AnnData to be updated 
-    tx_to_reassign : pd.DataFrame
+    tx_to_reassign : pl.DataFrame
         Transcripts that should be reassigned
 
     Returns
@@ -398,10 +435,12 @@ def make_reassignment_adata(adata: sc.AnnData,
         The AnnData object containing cell metainformation
     layer : str
         The layer upon which the update is computed 
-    tx_to_reassign : pd.DataFrame
+    tx_to_reassign : pl.DataFrame
         Transcripts that should be reassigned
     trial_layer : Optional[str] 
         If provided, the updated counts will be stored in this layer 
+    dr_method : str, optional
+        The dimension reduction method to be used. Either pca or umap, by default "umap"
     Returns
     -------
     sc.AnnData
@@ -425,7 +464,7 @@ def make_reassignment_adata(adata: sc.AnnData,
 def sample_logistic(shape: tuple, 
                     model_device: torch.device,
                     eps: float=1e-20):
-    """Sample gumbel random variables
+    """Sample standard logistic random variables
 
     Parameters
     ----------
@@ -439,7 +478,7 @@ def sample_logistic(shape: tuple,
     Returns
     -------
     torch.tensor
-        Gumbel RVs
+        Logistic RVs
     """
     U = torch.rand(shape).to(model_device)
     return torch.log(U/(1-U + eps) + eps)
@@ -459,7 +498,8 @@ def binary_gumbel_softmax_sample(logits: torch.tensor,
         Temperature
     model_device : torch.device
         Specify where the tensor will be stored 
-
+    hard: bool, optional 
+        Whether or not hard 0, 1 samples should be generated, by default True
     Returns
     -------
     torch.tensor
@@ -476,9 +516,31 @@ def binary_gumbel_softmax_sample(logits: torch.tensor,
 
 
 def calibrate_threshold(alpha_0: np.array,
-                        alpha_1: np.array) -> np.array:
+                        alpha_1: np.array) -> Callable:
+    """Find a threshold for dichotomization 
+
+    Parameters
+    ----------
+    alpha_0 : np.array
+        The intercept value computed based on the prior 50
+    alpha_1 : np.array
+        The slope value computed based on the prior 5
+
+    Returns
+    -------
+    Callable
+        A function that finds a proper threshold 
+    """
+    # The logic is if the transcripts are randomly scattered around, then with 
+    # the prior, we will only be assigning roughly 0.2% transcripts. 
+    # We want to set this as the threshold 0.5. 
+    # Based on the alpha_0 and alpha_1, we can compute the percentile rank 
+    # required to obtain 0.5 based on 1/(1+e^(-(alpha_0 + alpha_1 logit(p))).
+    # Since we are using the product, we compute 0.5**(1/3)
     temp = np.power(0.5, 1/3)
+    # Find the corresponding logit 
     logit = (np.log(temp/(1-temp+1e-20)+1e-20)-alpha_0)/(alpha_1+1e-20)
+    # Convert back to probability
     threshold = np.power(1-1/(1+np.exp(-logit)), 3)
     a=np.log(0.5)/np.log(threshold+1e-20)
     def calibrator(x: np.array) -> Callable:
@@ -491,8 +553,22 @@ class diagLinear(nn.Module):
                  features: int,
                  bias: bool=True,
                  initial_weights: Optional[Union[np.array, list]]=None,
-                 initial_bias: Optional[Union[np.array, list]]=None):
+                 initial_bias: Optional[Union[np.array, list]]=None) -> None:
+        """A linear module with only diagonal elements 
+
+        Parameters
+        ----------
+        features : int
+            Number of features 
+        bias : bool, optional
+            If bias should be included, by default True
+        initial_weights : Optional[Union[np.array, list]], optional
+            Initial values for weights, by default None
+        initial_bias : Optional[Union[np.array, list]], optional
+            Initial values for bias, by default None
+        """
         super().__init__()
+        # If inital values are not provided, we initialize them as they do in PyTorch
         stdv = 1. / np.sqrt(features)
         if initial_weights is not None:
             self.weight = nn.Parameter(torch.tensor(initial_weights, dtype=torch.float32).reshape(1, features))
@@ -505,7 +581,19 @@ class diagLinear(nn.Module):
             if bias:
                 self.bias = nn.Parameter(torch.FloatTensor(1, features).uniform_(-stdv, stdv))
             
-    def forward(self, X):
+    def forward(self, X: torch.tensor) -> torch.tensor:
+        """The forward pass 
+
+        Parameters
+        ----------
+        X : torch.tensor
+            Input tensor 
+
+        Returns
+        -------
+        torch.tensor
+            The computed values
+        """
         return X * self.weight + self.bias
 
 
@@ -513,7 +601,19 @@ class Positive(nn.Module):
     """This class is used to reparametrize model weights 
 
     """
-    def forward(self, X):
+    def forward(self, X: torch.tensor) -> torch.tensor:
+        """The forward pass 
+
+        Parameters
+        ----------
+        X : torch.tensor
+            Input tensor 
+
+        Returns
+        -------
+        torch.tensor
+            The computed values
+        """
         return F.softplus(X)
     
 
