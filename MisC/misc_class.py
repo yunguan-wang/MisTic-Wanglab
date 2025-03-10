@@ -15,7 +15,7 @@ import torch.nn.functional as F
 import torch.nn.utils.parametrize as parametrize
 # Utility function 
 from MisC.utility import import_data, calculate_mask_distance, binary_gumbel_softmax_sample,\
-        make_reassignment_adata, calibrate_threshold, diagLinear, Positive, JSONEncoder, even_split, process_time_ram
+        make_reassignment_adata, calibrate_threshold, diagLinear, Positive, JSONEncoder, even_split
 from MisC.generate_tx_feature import generate_feature
 from MisC.data_loader import generate_patch_coords, load_patch
 # User entertainment
@@ -50,6 +50,8 @@ class misc(nn.Module):
             The column containing the x coordinates of cell centroids in cell metadata file, by default 'center_x'
         cell_centroid_y_col : str, optional
             The column containing the y coordinates of cell centroids in cell metadata file, by default 'center_y'
+        celltype_col : Optional[str], optional
+            The column containing the cell type information in cell metadata file, by default None
         tx_x_col : str, optional
             The column containing the x coordinates of transcript in detected transcript file, by default 'global_x'
         tx_y_col : str, optional
@@ -58,8 +60,6 @@ class misc(nn.Module):
             The column containing the gene information of transcript in detected transcript file, by default 'gene'
         cell_col : str, optional
             The column containing the cell id of transcript in detected transcript file, by default 'cell_id'
-        celltype_col : Optional[str], optional
-            The column containing the cell type information in cell metadata file, by default None
         leiden_res : float, optional
             The resolution for leiden clustering, by default 1
         preprocess : bool, optional
@@ -67,11 +67,15 @@ class misc(nn.Module):
         max_centroid_dist : int, optional
             The threshold on cell-cell centroid distances beyond which we do not consider two cells being neighbors, by default 50
         mask_dist_cutoff : float, optional
-            The threshold of cell-cell distances beyond which a cell is no longer considered a neighbor, by default 1
+            The threshold of cell-cell distances beyond which a cell is no longer considered a neighbor, by default 5
         prior_50_reassign_prob : float, optional
-            The prior probability of reassigning a transcript that's ranked 50% based on the distance, by default 0.01
+            The prior probability of reassigning a transcript that's ranked 50%, by default 0.01
         prior_5_reassign_prob : float, optional
-            The prior probability of reassigning a transcript that's ranked 5% based on the distance, by default 0.5
+            The prior probability of reassigning a transcript that's ranked 5%, by default 0.99
+        seed: int, optional 
+            For reproducibitlity, by default 42
+        model_device : Optional[Union[str, torch.device]], optional
+            The device to use 
         """
         super().__init__()
         
@@ -102,8 +106,11 @@ class misc(nn.Module):
         self.tx_metadata = None
         self.current_layer = "counts_0"
         self.mask_distance = None
+        # intf_tx will contain info for all neighbors 
         self.intf_tx = None
+        # tx_reassign_info aggregates all neighbor info
         self.tx_reassign_info = None
+        # For each neighbor, we generate patches 
         self.coord_list = {"neighbor{}".format(i): [] for i in range(nearest)}
         self.tx_to_reassign_dict = {}
         
@@ -143,33 +150,34 @@ class misc(nn.Module):
                     cell_boundary_polygons: Union[str, gpd.GeoDataFrame],
                     detected_transcripts: Union[str, pd.DataFrame, gpd.GeoDataFrame],
                     cell_by_gene_counts: Optional[Union[str, pd.DataFrame]]=None) -> None:
-        """Read in the four pieces information needed for subsequent analysis: 
-        cell-by-gene counts, cell metadata, cell boundary information, and transcript information. Some 
-        basic visualization and cell clustering will be performed. 
+        """Read in the three pieces information needed for subsequent analysis: 
+        cell metadata, cell boundary information, transcript information, and 
+        optionally cell-by-gene matrix. Some data curation will be performed 
 
         Parameters
         ----------
         cell_metadata : Union[str, pd.DataFrame]
             Either the path to the csv file or a pandas dataframe containing the metadata for each cell whose 
             first column is assumed to contain the ID for each cell. The information in the file/object should 
-            at least contain the xy coordinates of the centers of cells named center_x, and center_y, respectively.
-            If the users have already performed cell typing which is not required and will only be used for visualization,
-            the information can be stored here as a separate column: cell_type.
+            at least contain the xy coordinates of the centers of cells.
+            If the users have already performed cell typing which is not required,
+            the information can be stored here as a separate column.
         cell_boundary_polygons : Union[str, gpd.GeoDataFrame]
             Either the path to the parquet file or the geopandas GeoDataFrame containing the vertex information 
-            for each cell. The first column is assumed to be the IDs for cells. It should contain one column 'Geometry'
+            for each cell. The first column is assumed to be the IDs for cells. It should contain one column 
             that records the coordinates of the vertices.
-        detected_transcripts : Union[str, pd.DataFrame]
-            Either the path to the csv file or a pandas dataframe containing the information of the detected transcripts.
+        detected_transcripts : Union[str, pd.DataFrame, gpd.GeoDataFrame]
+            Either the path to the csv file or a pandas dataframe or geopandas GeoDataFrame containing the information of the detected transcripts.
             The first column is assumed to be some index. The information should contain the ID for a transcripte/molecule, 
-            the ID of the cell it belongs to, its xy coordinate named global_x, global_y respectively, and its gene information. 
-        cell_by_gene_counts : Optional[Union[str, pd.DataFrame]]
+            the ID of the cell it belongs to, its xy coordinate, and its gene information. 
+        cell_by_gene_counts : Optional[Union[str, pd.DataFrame]], optional
             Either the path to the csv file or a pandas dataframe containing the cell-by-gene count matrix whose first 
             column is assumed to contain the ID for each cell while the rest of the columns should be the transcript counts
-            for each cell. 
-        
+            for each cell. If this is not provided, the cell-by-gene matrix will be constructed from the detected_transcripts.
+            If provided, the users are responsible for ensuring that the counts correspond to what's recorded in detected_transcripts , by default None
+            
         """
-        print("Importing data... This could take a while. But you already know what we are dealing with...")
+        # Import data 
         self.adata, self.cell_coords, self.tx_metadata = import_data(cell_metadata=cell_metadata,
                                                                       cell_boundary_polygons=cell_boundary_polygons,
                                                                       detected_transcripts=detected_transcripts,
@@ -177,11 +185,11 @@ class misc(nn.Module):
                                                                       **self.import_data_par)
         self.n_genes = self.adata.uns['n_genes']
         self.n_leiden = self.adata.uns['n_leiden']
-        print("Computing mask distances... Keep in mind, patience is a virtue...")
+        # Compute cell-cell mask distances
         self.mask_distance = calculate_mask_distance(adata=self.adata,
                                                       cell_coords=self.cell_coords,
                                                       **self.calculate_mask_distance_par)
-        print("Generating features for detected transcripts... Whatever, are we there yet...")
+        # Generate features 
         self.intf_tx = generate_feature(adata=self.adata,
                                         layer=self.current_layer,
                                         tx_metadata=self.tx_metadata,
@@ -197,9 +205,9 @@ class misc(nn.Module):
         Parameters
         ----------
         percent_cell_per_patch : float, optional
-            _description_, by default 0.1
+            Rough percentage of cell per patch, by default 0.1
         num_overlap : int, optional
-            _description_, by default 7
+            Akin to stride, by default 7
         """
         for neighbor_index in range(self.generate_feature_par['nearest']):
             key = "neighbor"+str(neighbor_index)
@@ -216,20 +224,20 @@ class misc(nn.Module):
         """Initialize model parameters 
 
         """
-        
+        # Based on the prior info, we first compute the coefficients 
         alpha_0 = -np.log(1/self.prior_50_reassign_prob-1+1e-20)
         temp = -np.log(0.05/0.95) 
         alpha_1 = (-np.log(1/self.prior_5_reassign_prob-1+1e-20) - alpha_0)/temp
-        
+        # And the calibration function
         self.calibrator = calibrate_threshold(alpha_0=alpha_0,
                                               alpha_1=alpha_1)
-        
+        # For the prior, no gradients 
         self.prior_reassign_coefficients = diagLinear(features=3, bias=True)
         self.prior_reassign_coefficients.bias = nn.Parameter(torch.tensor([alpha_0]*3, dtype=torch.float32).reshape_as(self.prior_reassign_coefficients.bias))
         self.prior_reassign_coefficients.weight = nn.Parameter(torch.tensor([alpha_1]*3, dtype=torch.float32).reshape_as(self.prior_reassign_coefficients.weight))
         for param in self.prior_reassign_coefficients.parameters():
             param.requires_grad = False
-        
+        # The posterior, we reparametrize
         self.reassign_coefficients = diagLinear(features=3, bias=True,
                                                 initial_weights=[np.log(np.exp(alpha_1)-1)]*3,
                                                 initial_bias=[alpha_0]*3)
@@ -268,7 +276,7 @@ class misc(nn.Module):
                                                         temperature=temperature,
                                                         model_device=self.model_device,
                                                         hard=True)
-        
+        # The final reassignment is a product of all three
         reassign_hard = torch.prod(individual_reassign_hard, dim=1, keepdim=True)
         
         return reassign_hard, reassign_probs
@@ -282,16 +290,17 @@ class misc(nn.Module):
         ----------
         updated_cell_by_gene_counts : torch.tensor
             Cell by gene counts matrix (after transcript reassignment)
-        prior_distance_features : torch.tensor
-            The transcript distance features before seeing the cell type information  
+        tx_prior_features : torch.tensor
+            The transcript features before seeing the cell type information  
 
         Returns
         -------
         Tuple[torch.tensor, torch.tensor]
             Logits for different cell types and the prior reassigning probabilities 
         """
+        # Likelihood 
         cell_type_logits = self.cell_type_coefficients(updated_cell_by_gene_counts)
-        
+        # Prior
         prior_reassign_logits = self.prior_reassign_coefficients(tx_prior_features)
         prior_reassign_probs = torch.sigmoid(prior_reassign_logits)
         
@@ -359,7 +368,7 @@ class misc(nn.Module):
                       cell_type_logits: torch.tensor, 
                       cell_type_labels: torch.tensor,
                       reassign_probs: torch.tensor,
-                      prior_reassign_probs: torch.tensor) -> torch.tensor:
+                      prior_reassign_probs: torch.tensor) -> Tuple[torch.tensor, np.array, np.array]:
         """The loss function 
 
         Parameters
@@ -376,7 +385,7 @@ class misc(nn.Module):
         Returns
         -------
         torch.tensor
-            The loss 
+            The loss, the cross entropy loss, the KLs 
         """
         # Cross entropy loss (despite its name it's a loss)
         CEl = F.cross_entropy(cell_type_logits,
@@ -397,6 +406,8 @@ class misc(nn.Module):
         ----------
         n_epochs : int
             Number of epochs 
+        early_stop_pval: float, optional 
+            The p-value for ks test 
         """
         
         # Preconstruct the information to save time 
@@ -412,6 +423,7 @@ class misc(nn.Module):
             self.current_temperature = self.init_temperature
             CEl_epoch_list = []
             KLD_epoch_list = []
+            # Starting from the 3rd epoch, we test if convergence has been achieved 
             if epoch >= 2:
                 cel_previous_2 = np.array(self.CEl_list[epoch-2])
                 cel_previous_1 = np.array(self.CEl_list[epoch-1])
@@ -421,10 +433,12 @@ class misc(nn.Module):
                     print("No improvement in the classification task detected. Stop early at epoch {}".format(epoch-1))
                     print("="*30)
                     break
+            # Shuffle the neighbor indices 
             neighbor_indices = list(range(self.generate_feature_par['nearest']))
             np.random.shuffle(neighbor_indices)
             for neighbor_index in neighbor_indices:
                 key = "neighbor"+str(neighbor_index)
+                # Shuffle the coordinates 
                 np.random.shuffle(self.coord_list[key])
                 sub_intf_tx = self.intf_tx.filter(pl.col("neighbor_index") == neighbor_index)
                 train_loss = 0.0
@@ -491,7 +505,9 @@ class misc(nn.Module):
                 reassign_probs = np.vstack([reassign_probs, reassign_probs_chunk.cpu().numpy()])
             # Store the computed probabilities 
             self.intf_tx = self.intf_tx.with_columns(pl.Series(name="reassign_probs_raw", values=reassign_probs.squeeze(-1)))
+            # Calibrate the probabilities 
             self.intf_tx = self.intf_tx.with_columns(pl.Series(name="reassign_probs", values=self.calibrator(reassign_probs.squeeze(-1))))
+            # Pick the most likely neighbor
             self.tx_reassign_info = self.intf_tx.group_by("molecule_id").agg(pl.all().sort_by("reassign_probs", descending=False).last())
 
     def reassign_tx(self,
@@ -501,7 +517,7 @@ class misc(nn.Module):
         Parameters
         ----------
         criteria : dict, optional
-            A dictionary of criterion name-criterion pair. For random assignment, the criterion should be a string, by default {"threshold": 0.5, "random": "random"}
+            A dictionary of criterion name-criterion pair, by default {"threshold": 0.5}
         """
         adata_obs = pl.from_pandas(self.adata.obs["cell_type"], include_index=True)
         for criterion_name in tqdm(criteria): 
@@ -509,11 +525,11 @@ class misc(nn.Module):
                                                         'prior_exp_feature',
                                                         'prior_neighbor_exp_feature'])
             criterion = criteria[criterion_name]
-            
+            # Dichotomize based on criterion 
             reassign = (tx_to_reassign['reassign_probs']>criterion).to_numpy().astype(int)
             tx_to_reassign = tx_to_reassign.with_columns(pl.Series(name='reassign', values=reassign))
             tx_to_reassign = tx_to_reassign.filter(pl.col("reassign")==1).drop("reassign")
-            
+            # Rename for readibility
             tx_to_reassign = tx_to_reassign.join(adata_obs.rename({"cell_type": "from_cell_type"}),
                                                  how='left', left_on='cell_id', right_on="cell_id")
             tx_to_reassign = tx_to_reassign.join(adata_obs.rename({"cell_type": "to_cell_type"}),
@@ -530,6 +546,7 @@ class misc(nn.Module):
                                                 tx_to_reassign=tx_to_reassign,
                                                 trial_layer=trial_layer,
                                                 dr_method=self.import_data_par['dr_method'])
+            # Rename for readibility
             tx_to_reassign = tx_to_reassign.rename({"cell_id": "from_cell_id",
                                                     "neighbor_cell_id": "to_cell_id"})
             self.tx_to_reassign_dict[trial_layer] = tx_to_reassign.to_pandas().copy()
@@ -543,9 +560,14 @@ class misc(nn.Module):
 
         Parameters
         ----------
-        path : str
-            The path to the torch model. It should end with .pt 
-            Other pieces of information will be saved in the same directory 
+        dir_name : str
+            The path to the directory where the model along with other info will be saved.
+        model_name : str
+            The name of the model 
+        save_reassigning_result : bool, optional 
+            Whether or not to save the reassignment result, by default True 
+        selected_criterion: Optional[str], optional 
+            If save result, which criterion should be saved
         """
         if save_reassigning_result:
             assert self.current_layer+"_"+selected_criterion in self.tx_to_reassign_dict, "selected_criterion not found in tx_to_reassign_dict"
@@ -579,9 +601,10 @@ class misc(nn.Module):
 
         Parameters
         ----------
-        path : str
-            The path to the torch model. It should end with .pt 
-            Other pieces of information will be saved in the same directory 
+        dir_name : str
+            The path to the directory where the model along with other info will be saved.
+        model_name : str
+            The name of the model 
         """
         
         model_meta = json.load(open(os.path.join(dir_name, model_name+"_meta.json")))
