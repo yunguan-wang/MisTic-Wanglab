@@ -62,8 +62,8 @@ class misc(nn.Module):
             The column containing the cell id of transcript in detected transcript file, by default 'cell_id'
         leiden_res : float, optional
             The resolution for leiden clustering, by default 1
-        preprocess : bool, optional
-            Whether or not to process the data. The processed data is only used for visualization, by default True
+        dr_method : str, optional
+            The dimension reduction method to be used. Either pca or umap, by default "umap"
         max_centroid_dist : int, optional
             The threshold on cell-cell centroid distances beyond which we do not consider two cells being neighbors, by default 50
         mask_dist_cutoff : float, optional

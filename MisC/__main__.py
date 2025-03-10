@@ -38,30 +38,28 @@ parser.add_argument("--author", action="version", version=__author__,
 # Instantiate object 
 parser.add_argument("--cell_centroid_x_y_col", nargs=2, type=str, default=['center_x', 'center_y'], 
                     help="The column containing the x and y coordinates of cell centroids in cell metadata file")
+parser.add_argument("--celltype_col", nargs='?', type=str,
+                    help="The column containing the cell type information in cell metadata file")
 parser.add_argument("--tx_x_y_col", nargs=2, type=str, default=["global_x", "global_y"], 
                     help="The column containing the x and y coordinates of transcript in detected transcript file")
 parser.add_argument("--gene_col", type=str, default="gene",
                     help="The column containing the gene of transcript in detected transcript file")
 parser.add_argument("--cell_col", type=str, default="cell_id",
                     help="The column containing the cell id of transcript in detected transcript file")
-parser.add_argument("--celltype_col", nargs='?', type=str,
-                    help="The column containing the cell type information in cell metadata file")
 parser.add_argument("--leiden_res", type=float, default=1,
                     help="The resolution for leiden clustering")
-parser.add_argument("--no_preprocess", action="store_true",
-                    help="If specified, no data processing including UMAP will be computed")
+parser.add_argument("--dr_method", type=str, default="umap",
+                    help="The dimension reduction method to be used. Either pca or umap")
 parser.add_argument("--max_centroid_dist", type=float, default=50,
                     help="When computing mask distances, if a centroid distance is greater than this value, the mask distance will not be computed.")
 parser.add_argument("--mask_dist_cutoff", type=float, default=5,
                     help="The threshold of cell-cell mask distances beyond which a cell is no longer considered a neighbor")
-parser.add_argument("--nearest", type=int, default=1,
+parser.add_argument("--nearest", type=int, default=3,
                     help="Maximum number of nearest neighbors to perform reassignment")
 parser.add_argument("--prior_50_reassign_prob", type=float, default=0.01,
-                    help="The prior probability of reassigning a transcript that's ranked 50% based on the distance")
-parser.add_argument("--prior_5_reassign_prob", type=float, default=0.05,
-                    help="The prior probability of reassigning a transcript that's ranked 5% based on the distance")
-parser.add_argument("--reparametrize", action="store_true",
-                    help="Whether or not to force positivity on coefficients")
+                    help="The prior probability of reassigning a transcript that's ranked 50%")
+parser.add_argument("--prior_5_reassign_prob", type=float, default=0.99,
+                    help="The prior probability of reassigning a transcript that's ranked 5%")
 
 # Import data 
 parser.add_argument("--cell_metadata", type=str, required=True,
@@ -78,7 +76,7 @@ parser.add_argument("--percent_cell_per_patch", type=float, default=0.1,
                     help="The rough percentage of cells within each minibatch")
 parser.add_argument("--num_overlap", type=int, default=7,
                     help='Number of overlapping patches')
-parser.add_argument("--n_epochs", type=int, default=1,
+parser.add_argument("--n_epochs", type=int, default=20,
                     help="Number of epochs")
 
 # reassign tx 
@@ -104,35 +102,33 @@ def main(cmdargs: argparse.Namespace):
         The command line argments and flags 
     """
     cell_centroid_x_col, cell_centroid_y_col = cmdargs.cell_centroid_x_y_col
+    celltype_col = cmdargs.celltype_col 
     tx_x_col, tx_y_col = cmdargs.tx_x_y_col
     gene_col = cmdargs.gene_col
     cell_col = cmdargs.cell_col 
-    celltype_col = cmdargs.celltype_col 
     leiden_res = cmdargs.leiden_res 
-    preprocess = not cmdargs.no_preprocess
+    dr_method = cmdargs.dr_method
     max_centroid_dist = cmdargs.max_centroid_dist
     mask_dist_cutoff = cmdargs.mask_dist_cutoff
     nearest = cmdargs.nearest
     prior_50_reassign_prob = cmdargs.prior_50_reassign_prob
     prior_5_reassign_prob = cmdargs.prior_5_reassign_prob
-    reparametrize = cmdargs.reparametrize
     
     
     m = misc(cell_centroid_x_col=cell_centroid_x_col,
              cell_centroid_y_col=cell_centroid_y_col,
-             tx_x_col=tx_x_col,
-             tx_y_col=tx_y_col,
-             gene_col=gene_col,
-             cell_col=cell_col,
-             celltype_col=celltype_col,
-             leiden_res=leiden_res,
-             preprocess=preprocess,
-             max_centroid_dist=max_centroid_dist,
-             mask_dist_cutoff=mask_dist_cutoff,
-             nearest=nearest,
-             prior_50_reassign_prob=prior_50_reassign_prob,
-             prior_5_reassign_prob=prior_5_reassign_prob,
-             reparametrize=reparametrize)
+            celltype_col=celltype_col,
+            tx_x_col=tx_x_col,
+            tx_y_col=tx_y_col,
+            gene_col=gene_col,
+            cell_col=cell_col,
+            leiden_res=leiden_res,
+            dr_method=dr_method,
+            max_centroid_dist=max_centroid_dist,
+            mask_dist_cutoff=mask_dist_cutoff,
+            nearest=nearest,
+            prior_50_reassign_prob=prior_50_reassign_prob,
+            prior_5_reassign_prob=prior_5_reassign_prob)
     
     cell_metadata = cmdargs.cell_metadata
     cell_boundary_polygons = cmdargs.cell_boundary_polygons
