@@ -20,8 +20,8 @@ def trial_patch_coords(adata: sc.AnnData,
     ----------
     adata : sc.AnnData
         An Anndata containing cell centroid information 
-    intf_tx : gpd.GeoDataFrame
-        Transcripts potentially to be reassigned 
+    interface_cells : list
+        List of cells in the interface 
     percent_cell_per_patch : float, optional
         Rough percentage of cells to be included in one patch, by default 0.01
     num_overlap : int
@@ -97,7 +97,12 @@ def generate_patch_coords(adata: sc.AnnData,
         An Anndata containing cell centroid information 
     intf_tx : gpd.GeoDataFrame
         Transcripts potentially to be reassigned 
-
+    percent_cell_per_patch : float, optional
+        Rough percentage of cells to be included in one patch, by default 0.01
+    num_overlap : int
+        How many times a patch will be overlapped. Similar to stride
+    neighbor_index : int, optional 
+        The index of neighbors 
     Returns
     -------
     list
@@ -147,14 +152,14 @@ def load_patch(adata_w_leiden_xy: pl.DataFrame,
 
     Parameters
     ----------
-    adata : sc.AnnData
-        An Anndata containing cell centroid information 
+    adata_w_leiden_xy : pl.DataFrame
+        A polars dataframe containing cell type and cell centroid information 
+    adata_var : pl.DataFrame 
+        A polars dataframe containing varable information 
     intf_tx : gpd.GeoDataFrame
         Transcripts potentially to be reassigned 
     coord_tuple : tuple
         A tuple of the four coordinates of a patch 
-    layer : str
-        The name of the layer from which gene counts are extracted 
     model_device : torch.device
         The torch device 
 

@@ -1,4 +1,4 @@
-![Logo](/assets/MisC.png)
+![Logo](/assets/logo.png)
 
 # MisC
 MisC is a probabilistic model for correcting mis-assigned transcripts due to cell segmentation error. It builds on top of [PyTorch] and [scanpy].
@@ -17,7 +17,7 @@ conda activate misc
 or 
 
 ```shell
-conda create -n misc python=3.9
+conda create -n misc python=3.10
 conda activate misc 
 ```
 
@@ -104,7 +104,7 @@ Note that the function will create a `molecule_id` column for the `detected_tran
 >>> # Generate minibatches for SGD
 >>> m.patchfy_data()
 >>> m.initialize_parameters()
->>> m.training_loop(n_epochs=5)
+>>> m.training_loop(n_epochs=20)
 ```
 
 3. Transcript reassignment
@@ -113,7 +113,7 @@ We allow users to specify various criteria/cutoff for reassigning transcripts. T
 
 ```python
 >>> m.compute_reassign_probs()
->>> m.trial_reassign_tx(criteria={"threshold": 0.5})
+>>> m.reassign_tx(criteria={"threshold": 0.5})
 >>> m.save_model(dir_name="PATH/TO/DIRECTORY",
                     model_name="misc",
                     save_reassigning_result=True,
@@ -122,14 +122,14 @@ We allow users to specify various criteria/cutoff for reassigning transcripts. T
 
 This will save PyTorch model `misc.pt` along with some meta information `misc_meta.json`. In addition, by specifying `save_reassigning_result=True` along with the `selected_criterion` the transcripts that will be reassigned according to the specified `threshold` will be save as `misc_tx_to_reassign.parquet`. 
 
-This `.parquet` file contains a dataframe with four columns `molecule_id`, `original_cell_id`, `reassigned_cell_id`, and `gene`. 
+This `.parquet` file contains a dataframe with four columns `molecule_id`, `from_cell_id`, `to_cell_id`, and `gene`. 
 
 The ids contained in the `molecule_id` column correspond to the row numbers of the original `detected_transcripts` file. Therefore, `tx_0` corresponds to the first record in the `detected_transcripts` file.
 
-If you are also interested in the computed reassigning probabilities, you can assess them via 
+If you are also interested in the computed reassigning probabilities, you can assess them via  
 
 ```python
->>> m.intf_tx
+>>> m.tx_reassign_info
 ```
 
 We do not provide a function to save this polars dataframe as it could be large. However, recomputing it would not take too long. 

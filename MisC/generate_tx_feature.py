@@ -29,10 +29,11 @@ def expression_feature(adata: sc.AnnData,
         The AnnData object containing cell metainformation
     layer : str
         Name of the layer. It should be like counts_0, counts_1_proposed_update, etc
-
+    seed: int, optional 
+        For reproducibitlity, by default 42
     Returns
     -------
-    Tuple[pd.DataFrame, pd.DataFrame]
+    Tuple[pl.DataFrame, pl.DataFrame]
         Differential analysis results 
     """
     n_cpus = get_num_processes(n_cpus=None)
@@ -125,36 +126,38 @@ def expression_feature(adata: sc.AnnData,
         
         exp_1vR_df.drop(columns=['log2FoldChange', 'padj'], inplace=True)
         exp_1vR_df = pl.from_pandas(exp_1vR_df)
-    # 
-    overall_log2_mean = np.log2(adata.to_df(layer).mean(axis=0) + 1).to_frame().T
     
-    expression_dist_tree = KDTree(adata.obsm['X_'+adata.uns['dr_method']+'_'+layer])
-    _, adj_ind = expression_dist_tree.query(adata.obsm['X_'+adata.uns['dr_method']+'_'+layer], k=50, workers=-1)
-    
-    adj = pl.from_numpy(adj_ind).with_columns(pl.Series(name="cell_id",
-                                                values=adata.obs_names)).unpivot(index="cell_id").drop("variable")
-    adj = adj.with_columns(pl.Series(name="n",
-                           values=adata.obs_names[adj['value']])).drop('value')
-    
-    pl_adata = pl.from_pandas(adata.to_df(layer), include_index=True)
-    adj = adj.join(pl_adata, how='left', left_on="n", right_on='cell_id').drop("n")
-    
-    gene_col = [col_n for col_n in adj.columns if col_n != "cell_id"]
-    adj = adj.group_by('cell_id').mean().with_columns(pl.col(gene) + 1 for gene in gene_col)
-    
-    log2fc = adj.with_columns(pl.col(gene).log(base=2) - overall_log2_mean[gene] for gene in gene_col)
-    
-    log2fc_rank = log2fc.select(["cell_id",
-                    pl.concat_list(pl.exclude("cell_id"))
-                    .list.eval(pl.element().rank(descending=True)/pl.element().count()*0.999).alias("rank").list.to_struct(
-                        fields=gene_col,
-                        n_field_strategy="max_width")]).unnest("rank")
-    
-    log2fc_feature = log2fc_rank.with_columns(pl.col(gene).log()-(1-pl.col(gene)).log() for gene in gene_col)
-    
-    prior_exp_1vR_df = log2fc_feature.unpivot(index="cell_id")
-    prior_exp_1vR_df = prior_exp_1vR_df.rename({"value": "prior_rest_self_exp_feature",
-                                                "variable": 'gene'})
+    with process_time_ram("Perform prior DE") as ctm:
+        # Without the celltype information, we first compute the mean of all genes 
+        overall_log2_mean = np.log2(adata.to_df(layer).mean(axis=0) + 1).to_frame().T
+        # Based on the DR results, we find the 50NNs
+        expression_dist_tree = KDTree(adata.obsm['X_'+adata.uns['dr_method']+'_'+layer])
+        _, adj_ind = expression_dist_tree.query(adata.obsm['X_'+adata.uns['dr_method']+'_'+layer], k=50, workers=-1)
+        # Map index back to cell ids 
+        adj = pl.from_numpy(adj_ind).with_columns(pl.Series(name="cell_id",
+                                                    values=adata.obs_names)).unpivot(index="cell_id").drop("variable")
+        adj = adj.with_columns(pl.Series(name="n",
+                            values=adata.obs_names[adj['value']])).drop('value')
+        # Add count information 
+        pl_adata = pl.from_pandas(adata.to_df(layer), include_index=True)
+        adj = adj.join(pl_adata, how='left', left_on="n", right_on='cell_id').drop("n")
+        # Compute mean 
+        gene_col = [col_n for col_n in adj.columns if col_n != "cell_id"]
+        adj = adj.group_by('cell_id').mean().with_columns(pl.col(gene) + 1 for gene in gene_col)
+        # Find log2 fold changes 
+        log2fc = adj.with_columns(pl.col(gene).log(base=2) - overall_log2_mean[gene] for gene in gene_col)
+        # Generate Features 
+        log2fc_rank = log2fc.select(["cell_id",
+                        pl.concat_list(pl.exclude("cell_id"))
+                        .list.eval(pl.element().rank(descending=True)/pl.element().count()*0.999).alias("rank").list.to_struct(
+                            fields=gene_col,
+                            n_field_strategy="max_width")]).unnest("rank")
+        
+        log2fc_feature = log2fc_rank.with_columns(pl.col(gene).log()-(1-pl.col(gene)).log() for gene in gene_col)
+        # Wide to long form 
+        prior_exp_1vR_df = log2fc_feature.unpivot(index="cell_id")
+        prior_exp_1vR_df = prior_exp_1vR_df.rename({"value": "prior_rest_self_exp_feature",
+                                                    "variable": 'gene'})
 
     return exp_1vR_df, prior_exp_1vR_df
 
@@ -164,7 +167,7 @@ def distance_feature(adata: sc.AnnData,
                     cell_coords: gpd.GeoDataFrame,
                     mask_distance: pd.DataFrame, 
                     mask_dist_cutoff: float=5,
-                    nearest: int=1) -> pl.DataFrame:
+                    nearest: int=3) -> pl.DataFrame:
     """Depending on the cell-cell distance computed based on cell masks, this function computes 
     the distances of all the transcripts of a cell to the nearest neighboring cell and then computes 
     the distance ratio 
@@ -180,8 +183,10 @@ def distance_feature(adata: sc.AnnData,
     mask_distance : pd.DataFrame
         The cell-cell distance based on cell masks 
     mask_dist_cutoff : float, optional
-        The threshold of cell-cell distances beyond which a cell is no longer considered a neighbor, by default 1
-
+        The threshold of cell-cell distances beyond which a cell is no longer considered a neighbor, by default 5
+    nearest: int, optional 
+        The number of nearest neighbors to consider, by default 3
+        
     Returns
     -------
     dict
@@ -293,7 +298,7 @@ def generate_feature(adata: sc.AnnData,
                     cell_coords: gpd.GeoDataFrame,
                     mask_distance: pd.DataFrame, 
                     mask_dist_cutoff: float=5,
-                    nearest: int=1,
+                    nearest: int=3,
                     seed: int=42) -> pl.DataFrame:
     """A wrap up function for expression_feature and distance_feature 
 
@@ -310,10 +315,14 @@ def generate_feature(adata: sc.AnnData,
     mask_distance : pd.DataFrame
         The cell-cell distance based on cell masks 
     mask_dist_cutoff : float, optional
-        The threshold of cell-cell distances beyond which a cell is no longer considered a neighbor, by default 1
+        The threshold of cell-cell distances beyond which a cell is no longer considered a neighbor, by default 5
+    nearest: int, optional 
+        The number of nearest neighbors to consider, by default 3
+    seed: int, optional 
+        For reproducibitlity, by default 42
     Returns
     -------
-    gpd.GeoDataFrame
+    pl.DataFrame
         A dataframe containing information on the transcripts 
     """
     # Features based on distance 
@@ -333,7 +342,7 @@ def generate_feature(adata: sc.AnnData,
                                 on=['cell_type', "gene"])
         intf_tx = intf_tx.join(prior_exp_1vR_df, how='left',
                             on=['cell_id', "gene"])
-        
+        # Rename columns to differentiate neighbor from self 
         intf_tx = intf_tx.join(exp_1vR_df.rename({"cell_type":"neighbor_celltype",
                                 "rest_self_exp_feature":"neighbor_rest_self_exp_feature"}), how='left',
                                 on=['neighbor_celltype', "gene"])
@@ -343,7 +352,7 @@ def generate_feature(adata: sc.AnnData,
                             "cell_id": "neighbor_cell_id"}), how='left',
                             on=['neighbor_cell_id', "gene"])
         intf_tx = intf_tx.with_columns(pl.col("prior_neighbor_rest_self_exp_feature").neg())
-        
+        # Rename the features 
         intf_tx = intf_tx.rename({"neighbor_rest_self_exp_feature": "neighbor_exp_feature",
                                 "prior_neighbor_rest_self_exp_feature": "prior_neighbor_exp_feature",
                                 "rest_self_exp_feature": "exp_feature",
