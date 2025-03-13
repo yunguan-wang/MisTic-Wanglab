@@ -242,6 +242,12 @@ if __name__ == "__main__":
             Need cell typing information in the 'xxx_spacia_meta.txt'.")
 
     parser.add_argument(
+        "--out_path",
+        "-o",
+        default=None,
+        help = "Path for all outputs")
+
+    parser.add_argument(
         "--input_path",
         default = '/data/wanglab/project/doublet_detection/data/merscope_hcc1',
         help = "Path for all input files, including cell type, cell by gene counts, transcript metadata and \
@@ -318,7 +324,12 @@ if __name__ == "__main__":
     pt = args.pct_tumor
     pdiff = args.pct_diff
     diag = args.diagnosis_plot
-    output_path = os.path.abspath('.')
+    output_path = args.out_path
+    if output_path is None:
+        output_path = input_path
+    else:
+        output_path = os.path.abspath(output_path)
+    os.makedirs(output_path, exist_ok=True)
     save_full_TX_meta = args.full_TX
     doublet_prob = 1 - args.doublet_prob
     os.chdir(input_path)
@@ -329,6 +340,13 @@ if __name__ == "__main__":
         print('All data are preprocessed, skip preprocessing.')
     print('Reading data')
     adata, tx_meta, cell_masks = load_data()
+    # Remove all other epithelial cells
+    adata = adata[adata.obs.cell_type!='Biliary_Duct_Epithelial_Cells']
+    adata.obs.cell_type = adata.obs.cell_type.astype(str).replace(
+        {
+            'Unknown_cells':'Th_cells'
+        }
+    )
 # %%
     # Simulate TX that are close to cell boundary.
     print('Replacing tumor cells at the interface with non tumor cells.')
@@ -339,35 +357,47 @@ if __name__ == "__main__":
     # only simulated TX from one neighbor. 
     # TXs from another neighbor is conceptually equivalent and computationally a simple repeat.
     interface_synthetic.drop_duplicates('tumor_cell', inplace=True)
-    n_points = 200
+    n_points = 1000
     # doublet level means the fraction of cell in the interaface to have at least one added TX
     print('Simulating TX points in {} cells. up to {} in each'.format(len(interface_synthetic), max_noise_tx))
-    simulated_points = {}
+    simulated_points_pos = {}
+    simulated_points_neg = {}
     # manipulated_cells = []
     neighbors = []
+    rng = np.random.default_rng()
     for tumor_cell in interface_synthetic.index:
+        num_neg_tx = num_pos_tx = np.random.randint(1,max_noise_tx)
+        tumor_p = cell_meta_synthetic.loc[tumor_cell,'polygon']
+        points = np.array(GeoSeries(tumor_p).sample_points(size=n_points).iloc[0].geoms)
+        neg_mask = np.zeros(1000, dtype=bool)
+        neg_mask[rng.choice(1000,size=num_neg_tx, replace=False)] = True
+        neg_points = points[neg_mask]
+        simulated_points_neg[tumor_cell] = neg_points
+        points = points[~neg_mask]
         if np.random.uniform(0,1,1) < doublet_prob:
             continue
         neighbor = interface_synthetic.loc[tumor_cell,'neaghbor_by_centroid']
-        tumor_p = cell_meta_synthetic.loc[tumor_cell,'polygon']
         neighbor_p = cell_meta_synthetic.loc[neighbor,'polygon']
-        points = GeoSeries(tumor_p).sample_points(size=n_points).iloc[0]
         dist_to_neighbor = distance(
-            points.geoms, np.repeat(neighbor_p,n_points)
+            points, np.repeat(neighbor_p,n_points - num_neg_tx)
         )
-        valid_points = np.array(
-            points.geoms)[dist_to_neighbor<tx2m_dist][:np.random.randint(1,max_noise_tx)].tolist()
-        if len(valid_points)==0:
+        pos_points = np.random.choice(
+            points[dist_to_neighbor<tx2m_dist],
+            min(num_pos_tx,(dist_to_neighbor<tx2m_dist).sum()),
+            replace=False
+        )
+        if len(pos_points)==0:
             continue
-        simulated_points[tumor_cell]= valid_points
-        neighbors += [neighbor] * len(valid_points)
+        simulated_points_pos[tumor_cell]= pos_points
+        neighbors += [neighbor] * len(pos_points)
     #%%
     # Differential analysis
     print('Assign each TX point to a DEG from neighbor cell.')
-    sc.pp.normalize_total(adata, target_sum=1000)
-    sc.pp.log1p(adata)
-    sc.tl.rank_genes_groups(adata, 'cell_type', pts=True)
-    deg = sc.get.rank_genes_groups_df(adata, None)
+    adata_synthetic.raw = adata_synthetic.copy()
+    sc.pp.normalize_total(adata_synthetic, target_sum=1000)
+    sc.pp.log1p(adata_synthetic)
+    sc.tl.rank_genes_groups(adata_synthetic, 'cell_type', pts=True, tie_correct=True, use_raw=False)
+    deg = sc.get.rank_genes_groups_df(adata_synthetic, None)
     deg = deg.merge(deg[deg.group=='Tumor_cells'][['names', 'pct_nz_group']],on='names')
     # Filter the deg that can be added to synthetic target cells
     deg = deg[
@@ -379,47 +409,73 @@ if __name__ == "__main__":
         ((deg.pct_nz_group_x - deg.pct_nz_reference)>=pdiff)
     ]
     ct_deg = deg.groupby('group').names.agg(lambda x : x.tolist())
+    # Identify genes selectively expressed in tumor cells
+    non_tumor_genes = np.unique(ct_deg.sum())
+    tumor_deg = sc.get.rank_genes_groups_df(
+        adata_synthetic, 'Tumor_cells', log2fc_min=1, pval_cutoff=0.01)
+    tumor_genes = tumor_deg[
+        (tumor_deg.pct_nz_reference <= 0.15) & 
+        (tumor_deg.pct_nz_group >= 0.5)
+    ].names.values
+    tumor_genes = [x for x in tumor_genes if x not in non_tumor_genes]
+
     # Randomly assign gene symbol for each simulated transcript
     interface_synthetic['neighbor_ct'] = cell_meta_synthetic.loc[
         interface_synthetic.neaghbor_by_centroid.values, 'cell_type'].values
-    interface_synthetic.loc[simulated_points.keys(),'synthetic_tx'] = pd.Series(
-        [*simulated_points.values()]).values
-    interface_synthetic = interface_synthetic.dropna()
-    interface_synthetic['tx_symbol'] = interface_synthetic.apply(
+    interface_synthetic.loc[simulated_points_pos.keys(),'synthetic_pos'] = pd.Series(
+        [*simulated_points_pos.values()]).values
+    interface_synthetic.loc[simulated_points_neg.keys(),'synthetic_neg'] = pd.Series(
+        [*simulated_points_neg.values()]).values
+    # interface_synthetic = interface_synthetic.dropna()
+    interface_synthetic.loc[
+        interface_synthetic.synthetic_pos.notnull(), 'pos_symbol'
+        ] = interface_synthetic.loc[interface_synthetic.synthetic_pos.notnull()].apply(
         lambda x: np.random.choice(
-            ct_deg.loc[x.neighbor_ct], len(x.synthetic_tx)
+            ct_deg.loc[x.neighbor_ct], len(x.synthetic_pos)
             ).tolist(),
         axis=1)
-    synthetic_txs = pd.DataFrame(
-        interface_synthetic.synthetic_tx.explode())
-    synthetic_txs['gene'] = interface_synthetic.tx_symbol.explode()
-    synthetic_txs['cell'] = synthetic_txs.index
-    synthetic_txs['num'] = 1
-    synthetic_txs['nearest_neighbor'] = neighbors
-    synthetic_txs['x'] = synthetic_txs['synthetic_tx'].apply(lambda x: x.x)
-    synthetic_txs['y'] = synthetic_txs['synthetic_tx'].apply(lambda x: x.y)
-    count_delta = synthetic_txs.groupby(['cell','gene']).num.count()
-    count_delta = count_delta.reset_index().pivot(
-        columns='gene', values='num', index='cell').fillna(0).astype(int)
+    interface_synthetic.loc[
+        interface_synthetic.synthetic_neg.notnull(), 'neg_symbol'
+        ] = interface_synthetic.loc[interface_synthetic.synthetic_neg.notnull()].apply(
+        lambda x: np.random.choice(tumor_genes, len(x.synthetic_neg)).tolist(),
+        axis=1)
 
-    # Update count matrix in synthetic adata
-    synthetic_counts = adata_synthetic.to_df()
-    synthetic_counts.loc[count_delta.index, count_delta.columns] += count_delta.values
-    adata_synthetic.X = synthetic_counts.values
+    synthetic_txs = []
+    for i in range(2):
+        tx_type = ['synthetic_pos','synthetic_neg'][i]
+        tx_symbol = ['pos_symbol', 'neg_symbol'][i]
+        tmp = interface_synthetic.dropna(subset=tx_type)
+        _syn_tx = pd.DataFrame(tmp[tx_type].explode())
+        _syn_tx['gene'] = tmp[tx_symbol].explode()
+        _syn_tx['cell_id'] = _syn_tx.index
+        _syn_tx['num'] = 1
+        if i == 0:
+            _syn_tx['neighbor'] = neighbors
+        _syn_tx['x'] = _syn_tx[tx_type].apply(lambda x: x.x)
+        _syn_tx['y'] = _syn_tx[tx_type].apply(lambda x: x.y)
+        _syn_tx['tx_type'] = tx_type
+        _syn_tx = _syn_tx.rename(columns={tx_type:'point'})
+        synthetic_txs.append(_syn_tx)
+    synthetic_txs = pd.concat(synthetic_txs)
 
-    # Check if the added genes are indeed lowly expressed in target tumor cells
-    print(
-        'Synthetic tx expression in target cells in original data:', 
-        adata_synthetic.to_df().loc[count_delta.index, count_delta.columns].sum().sum())
-    print(
-        'Synthetic tx expression in target cells total synthetic original_counts:', 
-        count_delta.sum().sum())
-    print(
-        'random selected, equal-sized sets of genes in target cells original original_counts:', 
-        adata_synthetic.to_df().loc[
-            count_delta.index, 
-            np.random.choice(adata_synthetic.to_df().columns, count_delta.shape[1])
-            ].sum().sum())
+    for g, df in synthetic_txs.groupby('tx_type'):
+        count_delta = df.groupby(['cell_id','gene']).num.count()
+        count_delta = count_delta.reset_index().pivot(
+            columns='gene', values='num', index='cell_id').fillna(0).astype(int)
+
+        # Check if the added genes are indeed lowly expressed in target tumor cells
+        print(
+            '{} expression in target cells in original data:'.format(g), 
+            adata_synthetic.raw.to_adata().to_df().loc[count_delta.index, count_delta.columns].sum().sum())
+        print(
+            '{} expression in target cells total synthetic original_counts:'.format(g), 
+            count_delta.sum().sum())
+        print(
+            'random selected, equal-sized sets of genes in target cells original original_counts:', 
+            adata_synthetic.raw.to_adata().to_df().loc[
+                count_delta.index, 
+                np.random.choice(adata_synthetic.raw.to_adata().to_df().columns, count_delta.shape[1])
+                ].sum().sum())
     #%%
     print('Saving outputs.')
     tx_meta_interface = tx_meta[tx_meta.cell.isin(adata_synthetic.obs_names)].copy()
@@ -430,15 +486,14 @@ if __name__ == "__main__":
     # Merge TX with permuted TX
     tx_meta_interface = tx_meta_interface[
         ~tx_meta_interface.cell.isin(permuted_tx_interface.cell.unique())]
+    tx_meta_interface['tx_type'] = 'real'
     permuted_tx_interface['gene'] = permuted_tx_interface['permuted_gene']
+    permuted_tx_interface['tx_type'] = 'permuted'
     tx_meta_interface = pd.concat(
         [tx_meta_interface, permuted_tx_interface])
     # Merge with synthetic TX
-    tx_meta_interface['tx_type'] = 'real'
     tx_meta_interface.rename({'cell':'cell_id'}, inplace=True, axis=1)
     synthetic_tx_meta = synthetic_txs.copy().drop('num',axis=1)
-    synthetic_tx_meta.columns = ['point', 'gene', 'cell_id','neighbor','x','y']
-    synthetic_tx_meta['tx_type'] = 'synthetic'
     # remove original TXs from original interface tumors
     tx_meta_interface = pd.concat([tx_meta_interface, synthetic_tx_meta])
     tx_meta_interface = GeoDataFrame(tx_meta_interface, geometry='point')
@@ -452,11 +507,7 @@ if __name__ == "__main__":
     if save_full_TX_meta:
         tx_meta_interface.to_parquet(output_path + '/synthetic_counts_tx_metadata.parquet', index=True)
     else:
-        permuted_tx_interface['tx_type'] = 'permuted'
-        permuted_tx_interface.index = ['permuted_tx_' + str(i) for i in range(len(permuted_tx_interface))]
-        permuted_tx_interface.rename(columns={'cell':'cell_id'}, inplace=True)
-        synthetic_tx_meta.index = ['syn_tx_' + str(i) for i in range(len(synthetic_tx_meta))]
-        tx_delta = pd.concat([permuted_tx_interface,synthetic_tx_meta])[keep]
+        tx_delta = tx_meta_interface[tx_meta_interface.tx_type.isin(['synthetic_pos','synthetic_neg'])]
         tx_delta['point'] = points_from_xy(tx_delta.x,tx_delta.y)
         GeoDataFrame(tx_delta, geometry='point').to_parquet(
             output_path + '/tx_metadata_delta.parquet', index=True)
@@ -470,22 +521,37 @@ if __name__ == "__main__":
     #%%
     # test plotting for debug purposes
     if diag:
-        for cell in tx_meta_interface[tx_meta_interface.tx_type=='synthetic'].cell_id.value_counts().index[:5]:
+        for cell in tx_meta_interface[tx_meta_interface.tx_type=='synthetic_pos'].cell_id.value_counts().index[:5]:
             _ = plt.figure()
             cell_tx = tx_meta_interface[tx_meta_interface.cell_id==cell]
             cell_poly = cell_masks.loc[cell,'polygon']
             xs, ys = cell_poly.exterior.xy
             plt.fill(xs, ys, alpha=0.5, fc='b', ec='none')
+            neighbor  = cell_tx.neighbor.dropna().unique()[0]
+            cell_poly = cell_masks.loc[neighbor,'polygon']
+            xs, ys = cell_poly.exterior.xy
+            plt.fill(xs, ys, alpha=0.5, fc='#b5bd61', ec='none')
             texts = []
-            for g, row in cell_tx.iterrows():
-                added_genes = cell_tx[cell_tx.tx_type!='real'].gene.unique()
+            mask = cell_tx.tx_type=='real'
+            plt.scatter(cell_tx.loc[mask,'x'], cell_tx.loc[mask,'y'], c= 'k', s=5)
+            mask_pos = cell_tx.tx_type=='synthetic_pos'
+            plt.scatter(cell_tx.loc[mask_pos,'x'], cell_tx.loc[mask_pos,'y'], c= 'r',s=5)
+            mask_neg = cell_tx.tx_type=='synthetic_neg'
+            plt.scatter(cell_tx.loc[mask_neg,'x'], cell_tx.loc[mask_neg,'y'], c= 'g',s=5)
+            added_tx = cell_tx[cell_tx.tx_type!='real']
+            for g, row in added_tx.iterrows():
                 try:
                     x, y = [float(i) for i in row['point'].split('(')[1][:-1].split(' ')]
                 except:
                     x, y = np.array(row['point'].xy).flatten()
-                plt.scatter(x, y, c= 'k' if row['tx_type'] == 'real' else 'r')
-                if row.gene in added_genes:
-                    texts.append(plt.text(x, y, row.gene, c='m'))
+                color = 'r' if row['tx_type'] == 'synthetic_pos' else 'g'
+                texts.append(plt.text(x, y, row.gene, c=color))
             adjustText.adjust_text(texts)
-            plt.savefig('Diagplot_{}.pdf'.format(cell))
+            plt.text(
+                    cell_meta_synthetic.loc[neighbor,'X'], 
+                    cell_meta_synthetic.loc[neighbor,'Y'], 
+                    cell_meta_synthetic.loc[neighbor,'cell_type'], 
+                    c='k', ha='center'
+                    )
+            plt.savefig(output_path + '/Diagplot_{}.pdf'.format(cell))
 # %%
