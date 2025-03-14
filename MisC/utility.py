@@ -10,11 +10,14 @@ import polars as pl
 import re 
 import numpy as np
 from scipy.special import betainc
+from scipy.spatial import KDTree
+from scipy.signal import find_peaks, peak_widths
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from shapely import distance
-from scipy.spatial import KDTree
+# User entertainment
+from tqdm.auto import tqdm
 # Typing and other info
 from typing import Optional, Union, Tuple, Callable
 from time import perf_counter
@@ -547,6 +550,30 @@ def calibrate_threshold(alpha_0: np.array,
         return betainc(a, 1, x)
     return calibrator
 
+
+def compute_gene_threshold(adata: sc.AnnData,
+                        tx_reassign_info: pl.DataFrame) -> pl.DataFrame:
+    all_genes = adata.var.index
+    result = pl.DataFrame(data={"gene": all_genes, 
+                                "threshold":0.0})
+    for n_row, gene in tqdm(enumerate(all_genes)): 
+        reassign_probs = tx_reassign_info.filter(pl.col('gene')==gene)['reassign_probs'] 
+        smoothed_counts, bin_edges = np.histogram(reassign_probs, bins=30)
+        # Detect peaks with prominence filter to avoid false positives
+        peaks, _ = find_peaks(smoothed_counts, height=5, prominence=20)
+        # Calculate peak widths with adjusted rel_height
+        results_half = peak_widths(smoothed_counts, peaks, rel_height=1)
+        # Extract and correct `left_ips` values
+        left_ips_corrected = np.maximum(results_half[2], 0)
+        if left_ips_corrected.shape[0] > 0:
+            l_index = round(left_ips_corrected[-1])
+            threshold = bin_edges[l_index]
+        else:
+            threshold = 0.5
+        if threshold < 0.5:
+            threshold = 0.5
+        result[n_row, "threshold"] = threshold
+    return result
 
 class diagLinear(nn.Module):
     def __init__(self, 

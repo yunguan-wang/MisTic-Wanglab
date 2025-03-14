@@ -15,7 +15,8 @@ import torch.nn.functional as F
 import torch.nn.utils.parametrize as parametrize
 # Utility function 
 from MisC.utility import import_data, calculate_mask_distance, binary_gumbel_softmax_sample,\
-        make_reassignment_adata, calibrate_threshold, diagLinear, Positive, JSONEncoder, even_split
+        make_reassignment_adata, calibrate_threshold, compute_gene_threshold,\
+            diagLinear, Positive, JSONEncoder, even_split
 from MisC.generate_tx_feature import generate_feature
 from MisC.data_loader import generate_patch_coords, load_patch
 # User entertainment
@@ -112,7 +113,7 @@ class misc(nn.Module):
         self.tx_reassign_info = None
         # For each neighbor, we generate patches 
         self.coord_list = {"neighbor{}".format(i): [] for i in range(nearest)}
-        self.tx_to_reassign_dict = {}
+        self.tx_to_reassign = None
         
         # Parameters for training 
         self.init_temperature = 1.0
@@ -511,51 +512,58 @@ class misc(nn.Module):
             self.tx_reassign_info = self.intf_tx.group_by("molecule_id").agg(pl.all().sort_by("reassign_probs", descending=False).last())
 
     def reassign_tx(self,
-                    criteria: dict={"threshold": 0.5}) -> None:
+                    criterion: Union[float, int, str]=0.5) -> None:
         """Generate transcript reassignment based on various criteria 
 
         Parameters
         ----------
-        criteria : dict, optional
-            A dictionary of criterion name-criterion pair, by default {"threshold": 0.5}
+        criteria : Union[float, int, str], optional
+            Either a number in [0,1] or 'auto'
         """
         adata_obs = pl.from_pandas(self.adata.obs["cell_type"], include_index=True)
-        for criterion_name in tqdm(criteria): 
-            tx_to_reassign = self.tx_reassign_info.drop(['prior_distance_feature',
-                                                        'prior_exp_feature',
-                                                        'prior_neighbor_exp_feature'])
-            criterion = criteria[criterion_name]
-            # Dichotomize based on criterion 
-            reassign = (tx_to_reassign['reassign_probs']>criterion).to_numpy().astype(int)
-            tx_to_reassign = tx_to_reassign.with_columns(pl.Series(name='reassign', values=reassign))
-            tx_to_reassign = tx_to_reassign.filter(pl.col("reassign")==1).drop("reassign")
-            # Rename for readibility
-            tx_to_reassign = tx_to_reassign.join(adata_obs.rename({"cell_type": "from_cell_type"}),
-                                                 how='left', left_on='cell_id', right_on="cell_id")
-            tx_to_reassign = tx_to_reassign.join(adata_obs.rename({"cell_type": "to_cell_type"}),
-                                                 how='left', left_on='neighbor_cell_id', right_on="cell_id")
-            tx_to_reassign = tx_to_reassign.drop(["cell_type", "neighbor_celltype"])
-            
-            trial_layer = self.current_layer+"_"+criterion_name
-            # For each criterion, we store the update 
-            # And make assignment to the count matrix 
-            # This will also compute UMAP by default
-            # We do not actually reassign transcript at this stage 
-            self.adata = make_reassignment_adata(adata=self.adata,
-                                                layer=self.current_layer,
-                                                tx_to_reassign=tx_to_reassign,
-                                                trial_layer=trial_layer,
-                                                dr_method=self.import_data_par['dr_method'])
-            # Rename for readibility
-            tx_to_reassign = tx_to_reassign.rename({"cell_id": "from_cell_id",
-                                                    "neighbor_cell_id": "to_cell_id"})
-            self.tx_to_reassign_dict[trial_layer] = tx_to_reassign.to_pandas().copy()
+        tx_to_reassign = self.tx_reassign_info.drop(['prior_distance_feature',
+                                                    'prior_exp_feature',
+                                                    'prior_neighbor_exp_feature'])
+        
+        if (criterion >= 0) and (criterion <= 1):
+            tx_to_reassign = tx_to_reassign.with_columns(pl.lit(criterion).cast(pl.Float64).alias("threshold"))
+        elif criterion == "auto":
+            gene_threshold = compute_gene_threshold(adata=self.adata,
+                                                    tx_reassign_info=self.tx_reassign_info)
+            tx_to_reassign = tx_to_reassign.join(gene_threshold, how='left',
+                                                 on='gene')
+        else: 
+            raise TypeError("Only a criterion within [0,1] or 'auto' is allowed.")   
+        
+        tx_to_reassign = tx_to_reassign.with_columns(pl.when((pl.col('reassign_probs')>pl.col("threshold"))).then(1).otherwise(0).alias('reassign'))
+        
+        tx_to_reassign = tx_to_reassign.filter(pl.col("reassign")==1).drop(["reassign", "threshold"])
+        # Rename for readibility
+        tx_to_reassign = tx_to_reassign.join(adata_obs.rename({"cell_type": "from_cell_type"}),
+                                                how='left', left_on='cell_id', right_on="cell_id")
+        tx_to_reassign = tx_to_reassign.join(adata_obs.rename({"cell_type": "to_cell_type"}),
+                                                how='left', left_on='neighbor_cell_id', right_on="cell_id")
+        tx_to_reassign = tx_to_reassign.drop(["cell_type", "neighbor_celltype"])
+        
+        trial_layer = self.current_layer+"_threshold"
+        # For each criterion, we store the update 
+        # And make assignment to the count matrix 
+        # This will also compute UMAP by default
+        # We do not actually reassign transcript at this stage 
+        self.adata = make_reassignment_adata(adata=self.adata,
+                                            layer=self.current_layer,
+                                            tx_to_reassign=tx_to_reassign,
+                                            trial_layer=trial_layer,
+                                            dr_method=self.import_data_par['dr_method'])
+        # Rename for readibility
+        tx_to_reassign = tx_to_reassign.rename({"cell_id": "from_cell_id",
+                                                "neighbor_cell_id": "to_cell_id"})
+        self.tx_to_reassign = tx_to_reassign.to_pandas().copy()
         
     def save_model(self,
                    dir_name: str,
                    model_name: str,
-                   save_reassigning_result: bool=False,
-                   selected_criterion: Optional[str]=None) -> None:
+                   save_reassigning_result: bool=True) -> None:
         """Save the model
 
         Parameters
@@ -566,12 +574,7 @@ class misc(nn.Module):
             The name of the model 
         save_reassigning_result : bool, optional 
             Whether or not to save the reassignment result, by default True 
-        selected_criterion: Optional[str], optional 
-            If save result, which criterion should be saved
         """
-        if save_reassigning_result:
-            assert self.current_layer+"_"+selected_criterion in self.tx_to_reassign_dict, "selected_criterion not found in tx_to_reassign_dict"
-        
         torch.save({'model_state_dict': self.state_dict()} | \
                 {'optimizer_state_dict': self.optimizer.state_dict()}, 
                 os.path.join(dir_name, model_name+".pt"))
@@ -584,15 +587,13 @@ class misc(nn.Module):
                       'prior_50_reassign_prob': self.prior_50_reassign_prob,
                       'prior_5_reassign_prob': self.prior_5_reassign_prob,
                       'current_layer': self.current_layer,
-                      "save_reassigning_result": save_reassigning_result,
-                      "selected_criterion": selected_criterion}
+                      "save_reassigning_result": save_reassigning_result}
         
         with open(os.path.join(dir_name, model_name+"_meta.json"), "w") as f:
             json.dump(model_meta, f, cls=JSONEncoder)
             
         if save_reassigning_result:
-            tx_to_reassign = self.tx_to_reassign_dict[self.current_layer+"_"+selected_criterion].copy()
-            tx_to_reassign.to_parquet(os.path.join(dir_name, model_name+"_tx_to_reassign.parquet"))
+            self.tx_to_reassign.to_parquet(os.path.join(dir_name, model_name+"_tx_to_reassign.parquet"))
         
     def load_model(self,
                    dir_name: str,
@@ -616,13 +617,10 @@ class misc(nn.Module):
         self.current_layer = model_meta['current_layer']
         self.prior_50_reassign_prob = model_meta['prior_50_reassign_prob']
         self.prior_5_reassign_prob = model_meta['prior_5_reassign_prob']
-        
         save_reassigning_result = model_meta['save_reassigning_result']
-        selected_criterion = model_meta['selected_criterion']
         
         if save_reassigning_result:
-            tx_to_reassign = pd.read_parquet(os.path.join(dir_name, model_name+"_tx_to_reassign.parquet"))
-            self.tx_to_reassign_dict = {self.current_layer+"_"+selected_criterion: tx_to_reassign}
+            self.tx_to_reassign = pd.read_parquet(os.path.join(dir_name, model_name+"_tx_to_reassign.parquet"))
         
         self.initialize_parameters()
         checkpoint = torch.load(os.path.join(dir_name, model_name+".pt")) 
