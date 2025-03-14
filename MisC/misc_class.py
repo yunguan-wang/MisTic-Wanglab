@@ -526,17 +526,18 @@ class misc(nn.Module):
                                                     'prior_neighbor_exp_feature'])
         
         if (criterion >= 0) and (criterion <= 1):
+            # If cirterion is a prob
             tx_to_reassign = tx_to_reassign.with_columns(pl.lit(criterion).cast(pl.Float64).alias("threshold"))
         elif criterion == "auto":
+            # Otherwise, we compute the thresholds 
             gene_threshold = compute_gene_threshold(adata=self.adata,
                                                     tx_reassign_info=self.tx_reassign_info)
             tx_to_reassign = tx_to_reassign.join(gene_threshold, how='left',
                                                  on='gene')
         else: 
             raise TypeError("Only a criterion within [0,1] or 'auto' is allowed.")   
-        
+        # Dichotimize according to threshold
         tx_to_reassign = tx_to_reassign.with_columns(pl.when((pl.col('reassign_probs')>pl.col("threshold"))).then(1).otherwise(0).alias('reassign'))
-        
         tx_to_reassign = tx_to_reassign.filter(pl.col("reassign")==1).drop(["reassign", "threshold"])
         # Rename for readibility
         tx_to_reassign = tx_to_reassign.join(adata_obs.rename({"cell_type": "from_cell_type"}),

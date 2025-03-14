@@ -553,6 +553,20 @@ def calibrate_threshold(alpha_0: np.array,
 
 def compute_gene_threshold(adata: sc.AnnData,
                         tx_reassign_info: pl.DataFrame) -> pl.DataFrame:
+    """Compute reassignment thresholds for all the genes 
+
+    Parameters
+    ----------
+    adata : sc.AnnData
+        An Anndata containing gene information 
+    tx_reassign_info : pl.DataFrame
+        A polars dataframe with reassigning probabilities
+
+    Returns
+    -------
+    pl.DataFrame
+        A dataframe with a threshold for each gene 
+    """
     all_genes = adata.var.index
     result = pl.DataFrame(data={"gene": all_genes, 
                                 "threshold":0.0})
@@ -569,11 +583,14 @@ def compute_gene_threshold(adata: sc.AnnData,
             l_index = round(left_ips_corrected[-1])
             threshold = bin_edges[l_index]
         else:
+            # If no peak is found, we set the threshold to 0.5
             threshold = 0.5
         if threshold < 0.5:
+            # If the threshold is less than 0.5, we raise it to 0.5
             threshold = 0.5
         result[n_row, "threshold"] = threshold
     return result
+
 
 class diagLinear(nn.Module):
     def __init__(self, 

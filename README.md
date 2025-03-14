@@ -109,18 +109,17 @@ Note that the function will create a `molecule_id` column for the `detected_tran
 
 3. Transcript reassignment
 
-We allow users to specify various criteria/cutoff for reassigning transcripts. The default is 0.5. 
+We allow users to specify either a threshold within [0,1] or 'auto' for reassigning transcripts. The default is 0.5. 
 
 ```python
 >>> m.compute_reassign_probs()
->>> m.reassign_tx(criteria={"threshold": 0.5})
+>>> m.reassign_tx(criterion=0.5)
 >>> m.save_model(dir_name="PATH/TO/DIRECTORY",
                     model_name="misc",
-                    save_reassigning_result=True,
-                    selected_criterion="threshold")
+                    save_reassigning_result=True)
 ```
 
-This will save PyTorch model `misc.pt` along with some meta information `misc_meta.json`. In addition, by specifying `save_reassigning_result=True` along with the `selected_criterion` the transcripts that will be reassigned according to the specified `threshold` will be save as `misc_tx_to_reassign.parquet`. 
+This will save PyTorch model `misc.pt` along with some meta information `misc_meta.json`. In addition, by specifying `save_reassigning_result=True` the transcripts that will be reassigned according to the specified `threshold` will be save as `misc_tx_to_reassign.parquet`. 
 
 This `.parquet` file contains a dataframe with four columns `molecule_id`, `from_cell_id`, `to_cell_id`, and `gene`. 
 
@@ -137,10 +136,11 @@ We do not provide a function to save this polars dataframe as it could be large.
 
 ### Command-Line Interface (CLI)
 
-Coming soon. 
+```shell
+python -m MisC 
+```
 
-## Documentation 
-Writing software documentation is like cleaning your room—everyone agrees it’s important, but no one wants to do it until they can’t find something.
+
 
 ## Citation
 Citing a paper is like sending a thank-you note—it’s polite, necessary, and half the time you’re just copying what someone else did.

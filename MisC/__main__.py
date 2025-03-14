@@ -80,8 +80,8 @@ parser.add_argument("--n_epochs", type=int, default=20,
                     help="Number of epochs")
 
 # reassign tx 
-parser.add_argument("--criteria", type=float, default=0.5,
-                    help="Threshold on reassigning the transcript")
+parser.add_argument("--criterion", type=str, default="0.5",
+                    help="Threshold on reassigning the transcript. Should either be 'auto' or a number in [0,1]")
 
 # Model saving 
 parser.add_argument("--dir_name", type=str, default=".",
@@ -152,14 +152,19 @@ def main(cmdargs: argparse.Namespace):
     m.training_loop(n_epochs=n_epochs)
     m.compute_reassign_probs()
     
-    criteria = {"threshold": cmdargs.criteria}
-    m.reassign_tx(criteria=criteria)
+    
+    criterion = cmdargs.criterion
+    if criterion != "auto":
+        try:
+            criterion = float(criterion)
+        except TypeError:
+            print("Only a criterion within [0,1] or 'auto' is allowed.") 
+    m.reassign_tx(criterion=criterion)
     
     # saving model 
     m.save_model(dir_name=cmdargs.dir_name,
                  model_name=cmdargs.model_name,
-                 save_reassigning_result=True,
-                 selected_criterion='threshold')
+                 save_reassigning_result=True)
     sys.exit(0)
 
 
