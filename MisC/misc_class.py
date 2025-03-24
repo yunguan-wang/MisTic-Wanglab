@@ -578,8 +578,8 @@ class misc(nn.Module):
         """
         criterion_df = []
         
-        for reassign_threshold in tqdm(reassign_threshold_grid):
-            for remove_threshold in remove_threshold_grid:
+        for reassign_threshold in tqdm(reassign_threshold_grid, desc="Reassign grid"):
+            for remove_threshold in tqdm(remove_threshold_grid, desc="Remove grid"):
                 # Correct tx 
                 tx_to_reassign, tx_to_remove = self._correct_tx(adata_obs=adata_obs,
                                                             reassign_threshold=reassign_threshold,
