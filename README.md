@@ -111,23 +111,31 @@ Note that the function will create a `molecule_id` column for the `detected_tran
 
 Note that the algorithm will not necessarily train `20` epochs due to the implementation of an early stopping mechanism. So no need to panic. 
 
-3. Transcript reassignment
+3. Transcript correction
 
-We allow users to specify either a threshold within [0,1] or 'auto' for reassigning transcripts. The default is 0.5. 
+We allow users to specify two grids over which to search for the best combination of threshods.
+
+`reassign_threshold_grid` should be an array/list of numbers within [0, 1]. Transcripts with `reassign_probs` greater than the threshold will be reassigned. 
+
+`remove_threshold_grid` should be an array/list of numbers within [0, 1]. For transcripts that are NOT reassigned, a 
+separate threshold will be generated. For example, if the `reassign_threshold=0.3` and the `remove_threshold=1/3`, the actual threshold will be `0.3*(1-1/3)=0.2`. Transcripts with `reassign_probs` greater than the threshold will be removed. If removal is not desired, simply set `remove_threshold_grid=0`.
 
 ```python
 >>> m.compute_reassign_probs()
->>> m.reassign_tx(criterion=0.5)
+>>> m.correct_tx(reassign_threshold_grid=np.arange(start=0.1, stop=0.5, step=0.1),
+                remove_threshold_grid=np.linspace(start=0, stop=1, num=10))
 >>> m.save_model(dir_name="PATH/TO/DIRECTORY",
                     model_name="misc",
-                    save_reassigning_result=True)
+                    save_correction_result=True)
 ```
 
-This will save PyTorch model `misc.pt` along with some meta information `misc_meta.json`. In addition, by specifying `save_reassigning_result=True` the transcripts that will be reassigned according to the specified `threshold` will be save as `misc_tx_to_reassign.parquet`. 
+This will save PyTorch model `misc.pt` along with some meta information `misc_meta.json`. In addition, by specifying `save_correction_result=True` the transcripts that will be reassigned/removed will be save as `misc_tx_to_reassign.parquet`/`misc_tx_to_remove.parquet`. 
 
 This `.parquet` file contains a dataframe with four columns `molecule_id`, `from_cell_id`, `to_cell_id`, and `gene`. 
 
 The ids contained in the `molecule_id` column correspond to the row numbers of the original `detected_transcripts` file. Therefore, `tx_0` corresponds to the first record in the `detected_transcripts` file.
+
+`misc_criterion_df.csv` contains the loss computed based on various combinations of thresholds. 
 
 If you are also interested in the computed reassigning probabilities, you can assess them via  
 
