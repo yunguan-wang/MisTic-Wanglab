@@ -390,7 +390,8 @@ def extract_layer_num(layer: str) -> int:
     
 
 def generate_count_patches(adata: sc.AnnData,
-                           tx_to_reassign: pl.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
+                           tx_to_reassign: pl.DataFrame,
+                           tx_to_remove: pl.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """Based on the transcript reassignment, generate patches to update the current count matrix 
 
     Parameters
@@ -399,34 +400,42 @@ def generate_count_patches(adata: sc.AnnData,
         An AnnData to be updated 
     tx_to_reassign : pl.DataFrame
         Transcripts that should be reassigned
+    tx_to_remove : pl.DataFrame
+        Transcripts that should be removed
 
     Returns
     -------
     Tuple[pd.DataFrame, pd.DataFrame]
         The first dataframe contains counts that should be subtracted from the current count
         The second dataframe contains counts that should be added to the current count
+        The third dataframe contains counts that should be subtracted from the current count
     """
-    # Generate two patches for the count matrix 
+    # Generate three patches for the count matrix 
     counts_to_subtract = pd.DataFrame(0, index=adata.obs_names, columns=adata.var_names)
     counts_to_add = pd.DataFrame(0, index=adata.obs_names, columns=adata.var_names)
+    rm_counts_to_subtract = pd.DataFrame(0, index=adata.obs_names, columns=adata.var_names)
     # For removal, we for each cell count how many genes occured 
     cell_to_remove = tx_to_reassign.group_by(['cell_id', "gene"]).len().to_pandas()
+    rm_cell_to_remove = tx_to_remove.group_by(['cell_id', "gene"]).len().to_pandas()
     # For addition, we for each cell in the neighbor count how many genes occured 
     cell_to_add = tx_to_reassign.group_by(['neighbor_cell_id', "gene"]).len().to_pandas()
     cell_to_add.rename(columns={"neighbor_cell_id": "cell_id"}, inplace=True)
     # Transform the dataframe from long to wide 
     subtract_patch = pd.pivot(cell_to_remove, values="len", columns="gene", index='cell_id').fillna(0)
     add_patch = pd.pivot(cell_to_add, values="len", columns="gene", index='cell_id').fillna(0)
+    rm_subtract_patch = pd.pivot(rm_cell_to_remove, values="len", columns="gene", index='cell_id').fillna(0)
     # The update the find matching rows and columns 
     counts_to_subtract.update(subtract_patch)
     counts_to_add.update(add_patch)
+    rm_counts_to_subtract.update(rm_subtract_patch)
     
-    return counts_to_subtract, counts_to_add
+    return counts_to_subtract, counts_to_add, rm_counts_to_subtract
 
 
 def make_reassignment_adata(adata: sc.AnnData,
                             layer: str,
                             tx_to_reassign: pl.DataFrame,
+                            tx_to_remove: pl.DataFrame,
                             trial_layer: Optional[str]=None,
                             dr_method: str='pca') -> sc.AnnData:
     """Make the count adjustment on the adata alone 
@@ -440,6 +449,8 @@ def make_reassignment_adata(adata: sc.AnnData,
         The layer upon which the update is computed 
     tx_to_reassign : pl.DataFrame
         Transcripts that should be reassigned
+    tx_to_remove : pl.DataFrame
+        Transcripts that should be removed
     trial_layer : Optional[str] 
         If provided, the updated counts will be stored in this layer 
     dr_method : str, optional
@@ -450,14 +461,15 @@ def make_reassignment_adata(adata: sc.AnnData,
         The adjusted adata
     """
     with process_time_ram("Updating gene counts") as ctm: 
-        counts_to_subtract, counts_to_add = generate_count_patches(adata=adata,
-                                                                tx_to_reassign=tx_to_reassign)
+        counts_to_subtract, counts_to_add, rm_counts_to_subtract = generate_count_patches(adata=adata,
+                                                                                        tx_to_reassign=tx_to_reassign,
+                                                                                        tx_to_remove=tx_to_remove)
         layer_num = extract_layer_num(layer)
         if trial_layer is None:
             trial_layer = "counts_"+str(int(layer_num+1))
             
         # Update adata
-        adata.layers[trial_layer] = adata.layers[layer]+counts_to_add-counts_to_subtract 
+        adata.layers[trial_layer] = adata.layers[layer]+counts_to_add-counts_to_subtract-rm_counts_to_subtract
         if np.any(adata.layers[trial_layer]<0):
             raise Exception("Negative values generated. This might be due inconsistency between the count matrix and the tx data.")
         adata = process_adata(adata=adata, layer=trial_layer, dr_method=dr_method)

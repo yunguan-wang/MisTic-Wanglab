@@ -15,7 +15,7 @@ import torch.nn.functional as F
 import torch.nn.utils.parametrize as parametrize
 # Utility function 
 from MisC.utility import import_data, calculate_mask_distance, binary_gumbel_softmax_sample,\
-        make_reassignment_adata, calibrate_threshold, compute_gene_threshold,\
+        make_reassignment_adata, calibrate_threshold, compute_gene_threshold, generate_count_patches,\
             diagLinear, Positive, JSONEncoder, even_split
 from MisC.generate_tx_feature import generate_feature
 from MisC.data_loader import generate_patch_coords, load_patch
@@ -114,6 +114,8 @@ class misc(nn.Module):
         # For each neighbor, we generate patches 
         self.coord_list = {"neighbor{}".format(i): [] for i in range(nearest)}
         self.tx_to_reassign = None
+        self.tx_to_remove = None
+        self.criterion_df = None
         
         # Parameters for training 
         self.init_temperature = 1.0
@@ -485,7 +487,6 @@ class misc(nn.Module):
             self.CEl_list.append(np.array(CEl_epoch_list))
             self.KLD_list.append(np.array(KLD_epoch_list))
                 
-
     def compute_reassign_probs(self) -> None:
         """Compute reassignment probabilities
         """
@@ -511,42 +512,133 @@ class misc(nn.Module):
             # Pick the most likely neighbor
             self.tx_reassign_info = self.intf_tx.group_by("molecule_id").agg(pl.all().sort_by("reassign_probs", descending=False).last())
 
-    def reassign_tx(self,
-                    criterion: Union[float, int, str]=0.5) -> None:
-        """Generate transcript reassignment based on various criteria 
+    def _correct_tx(self,
+                    adata_obs: pl.DataFrame,
+                    reassign_threshold: float,
+                    remove_threshold: float) -> Tuple[pl.DataFrame, pl.DataFrame]:
+        """Correct tx given thrsholds
 
         Parameters
         ----------
-        criteria : Union[float, int, str], optional
-            Either a number in [0,1] or 'auto'
+        adata_obs : pl.DataFrame
+            Cell types from adata.obs
+        reassign_threshold : float
+            Threshold for reassigning tx
+        remove_threshold : float
+            Threshold for removing tx in percentage of reassign_threshold. 
+            For example, if reassign_threshold=0.3 and remove_threshold=1/3, 
+            the actual threshold for removal is 0.3 * (1-1/3)=0.2
+
+        Returns
+        -------
+        Tuple[pl.DataFrame, pl.DataFrame]
+            Reassigned transcripts, removed transcripts 
         """
-        adata_obs = pl.from_pandas(self.adata.obs["cell_type"], include_index=True)
-        tx_to_reassign = self.tx_reassign_info.drop(['prior_distance_feature',
+        tx_to_change = self.tx_reassign_info.drop(['prior_distance_feature',
                                                     'prior_exp_feature',
                                                     'prior_neighbor_exp_feature'])
-        
-        if (criterion >= 0) and (criterion <= 1):
-            # If cirterion is a prob
-            tx_to_reassign = tx_to_reassign.with_columns(pl.lit(criterion).cast(pl.Float64).alias("threshold"))
-        elif criterion == "auto":
-            # Otherwise, we compute the thresholds 
-            gene_threshold = compute_gene_threshold(adata=self.adata,
-                                                    tx_reassign_info=self.tx_reassign_info)
-            tx_to_reassign = tx_to_reassign.join(gene_threshold, how='left',
-                                                 on='gene')
-        else: 
-            raise TypeError("Only a criterion within [0,1] or 'auto' is allowed.")   
-        # Dichotimize according to threshold
-        tx_to_reassign = tx_to_reassign.with_columns(pl.when((pl.col('reassign_probs')>pl.col("threshold"))).then(1).otherwise(0).alias('reassign'))
-        tx_to_reassign = tx_to_reassign.filter(pl.col("reassign")==1).drop(["reassign", "threshold"])
-        # Rename for readibility
+        # Add reassign threshold 
+        tx_to_change = tx_to_change.with_columns(pl.lit(reassign_threshold).cast(pl.Float64).alias("reassign_threshold"))
+        # Add removal threshold 
+        tx_to_change = tx_to_change.with_columns((pl.col("reassign_threshold")*(1-remove_threshold)).alias("remove_threshold"))
+        # Dichotomize results 
+        tx_to_change = tx_to_change.with_columns(pl.when((pl.col('reassign_probs')>pl.col("reassign_threshold"))).then(1).otherwise(0).alias('reassign'))
+        # For not reassigned tx, remove them per threshold 
+        tx_to_change = tx_to_change.with_columns(pl.when((pl.col("reassign")==0) & (pl.col('reassign_probs')>pl.col("remove_threshold"))).then(1).otherwise(0).alias('remove'))
+        # Filter reassigned 
+        tx_to_reassign = tx_to_change.filter(pl.col("reassign")==1).drop(["reassign", "remove", "reassign_threshold", "remove_threshold"])
+        tx_to_remove = tx_to_change.filter(pl.col("remove")==1).drop(["reassign", "remove", "reassign_threshold", "remove_threshold"])
+        # Rename for readability
         tx_to_reassign = tx_to_reassign.join(adata_obs.rename({"cell_type": "from_cell_type"}),
                                                 how='left', left_on='cell_id', right_on="cell_id")
         tx_to_reassign = tx_to_reassign.join(adata_obs.rename({"cell_type": "to_cell_type"}),
                                                 how='left', left_on='neighbor_cell_id', right_on="cell_id")
         tx_to_reassign = tx_to_reassign.drop(["cell_type", "neighbor_celltype"])
+        # Filter removed 
+        tx_to_remove = tx_to_remove.join(adata_obs.rename({"cell_type": "from_cell_type"}),
+                                                how='left', left_on='cell_id', right_on="cell_id")
+        tx_to_remove = tx_to_remove.drop(["cell_type", "neighbor_celltype"])
         
-        trial_layer = self.current_layer+"_threshold"
+        return tx_to_reassign, tx_to_remove
+    
+    def _find_criteria(self,
+                    adata_obs: pl.DataFrame,
+                    reassign_threshold_grid: Union[np.array, list],
+                    remove_threshold_grid: Union[np.array, list]) -> None:
+        """Grid search for criteria 
+
+        Parameters
+        ----------
+        adata_obs : pl.DataFrame
+            Cell types from adata.obs
+        reassign_threshold_grid : Union[np.array, list]
+            An array of reassign threshold to try 
+        remove_threshold_grid : Union[np.array, list]
+            An array of remove threshold to try 
+        """
+        criterion_df = []
+        
+        for reassign_threshold in tqdm(reassign_threshold_grid):
+            for remove_threshold in remove_threshold_grid:
+                # Correct tx 
+                tx_to_reassign, tx_to_remove = self._correct_tx(adata_obs=adata_obs,
+                                                            reassign_threshold=reassign_threshold,
+                                                            remove_threshold=remove_threshold)
+                # Generate patches 
+                counts_to_subtract, counts_to_add, rm_counts_to_subtract = generate_count_patches(adata=self.adata,
+                                                                                                tx_to_reassign=tx_to_reassign,
+                                                                                                tx_to_remove=tx_to_remove)
+                # Split into chunks 
+                X_chunks = even_split(array=(self.adata.to_df("counts_0")+counts_to_add-counts_to_subtract-rm_counts_to_subtract).values,
+                               chunk_size=np.ceil(self.adata.X.shape[0]/100))
+                leiden_chunks = even_split(array=self.adata.obs["counts_0_leiden"].astype(int).values,
+                                    chunk_size=np.ceil(self.adata.X.shape[0]/100))
+                loss = 0
+                with torch.no_grad():
+                    for X, leiden in zip(X_chunks, leiden_chunks):
+                        X_chunks = torch.tensor(X, dtype=torch.float32, device=self.model_device)
+                        leiden = torch.tensor(leiden, dtype=torch.int64, device=self.model_device)
+                        cell_type_logits = self.cell_type_coefficients(X)
+                        loss += F.cross_entropy(cell_type_logits, leiden, reduction='sum').cpu().numpy().item()
+                loss /= (self.adata.X.shape[0])
+                
+                criterion_df.append((reassign_threshold, remove_threshold, loss, tx_to_remove.shape[0]))
+        self.criterion_df=pd.DataFrame(criterion_df, columns=['reassign_threshold', 'remove_threshold', 'loss', "n_removed"])
+        # The first would be the best criterion
+        self.criterion_df.sort_values("loss", ascending=True, ignore_index=True, inplace=True)
+        self.criterion_df.loc[:, "remove_threshold_raw"] = self.criterion_df.loc[:, 'reassign_threshold'] * (1-self.criterion_df.loc[:, 'remove_threshold'])
+    
+    def correct_tx(self,
+                    reassign_threshold_grid: Union[int, float, np.array, list]=np.arange(start=0.1, stop=0.5, step=0.1),
+                    remove_threshold_grid: Union[int, float, np.array, list]=np.linspace(start=0, stop=1, num=10)) -> None:
+        """Generate transcript reassignment based on various criteria 
+
+        Parameters
+        ----------
+        reassign_threshold_grid : Union[int, float, np.array, list], optional
+            An array of reassign threshold to try , by default np.arange(start=0.1, stop=0.5, step=0.1)
+        remove_threshold_grid : Union[int, float, np.array, list], optional
+            An array of remove threshold in percentage of reassign threshold to try, by default np.linspace(start=0, stop=1, num=10)
+        """
+        adata_obs = pl.from_pandas(self.adata.obs["cell_type"], include_index=True)  
+        # Make sure the grid is iterable 
+        if isinstance(reassign_threshold_grid, int) or isinstance(reassign_threshold_grid, float):
+            reassign_threshold_grid = [reassign_threshold_grid]
+        if isinstance(remove_threshold_grid, int) or isinstance(remove_threshold_grid, float):
+            remove_threshold_grid = [remove_threshold_grid]
+        # Generate cirteria df
+        self._find_criteria(adata_obs=adata_obs,
+                            reassign_threshold_grid=reassign_threshold_grid,
+                            remove_threshold_grid=remove_threshold_grid)
+        # The first one is the best 
+        reassign_threshold = self.criterion_df.at[0, "reassign_threshold"]
+        remove_threshold = self.criterion_df.at[0, "remove_threshold"]
+        # Generate tx 
+        tx_to_reassign, tx_to_remove = self._correct_tx(adata_obs=adata_obs,
+                                                        reassign_threshold=reassign_threshold,
+                                                        remove_threshold=remove_threshold)
+
+        trial_layer = self.current_layer+"_corrected"
         # For each criterion, we store the update 
         # And make assignment to the count matrix 
         # This will also compute UMAP by default
@@ -554,17 +646,21 @@ class misc(nn.Module):
         self.adata = make_reassignment_adata(adata=self.adata,
                                             layer=self.current_layer,
                                             tx_to_reassign=tx_to_reassign,
+                                            tx_to_remove=tx_to_remove,
                                             trial_layer=trial_layer,
                                             dr_method=self.import_data_par['dr_method'])
         # Rename for readibility
         tx_to_reassign = tx_to_reassign.rename({"cell_id": "from_cell_id",
                                                 "neighbor_cell_id": "to_cell_id"})
+        tx_to_remove = tx_to_remove.rename({"cell_id": "from_cell_id"})
+        
         self.tx_to_reassign = tx_to_reassign.to_pandas().copy()
+        self.tx_to_remove = tx_to_remove.to_pandas().copy()
         
     def save_model(self,
                    dir_name: str,
                    model_name: str,
-                   save_reassigning_result: bool=True) -> None:
+                   save_correction_result: bool=True) -> None:
         """Save the model
 
         Parameters
@@ -588,14 +684,17 @@ class misc(nn.Module):
                       'prior_50_reassign_prob': self.prior_50_reassign_prob,
                       'prior_5_reassign_prob': self.prior_5_reassign_prob,
                       'current_layer': self.current_layer,
-                      "save_reassigning_result": save_reassigning_result}
+                      "save_correction_result": save_correction_result}
         
         with open(os.path.join(dir_name, model_name+"_meta.json"), "w") as f:
             json.dump(model_meta, f, cls=JSONEncoder)
-            
-        if save_reassigning_result:
-            self.tx_to_reassign.to_parquet(os.path.join(dir_name, model_name+"_tx_to_reassign.parquet"))
         
+        if save_correction_result:
+            self.criterion_df.to_csv(os.path.join(dir_name, model_name+"_criteria_df.csv"),
+                                     index=False)
+            self.tx_to_reassign.to_parquet(os.path.join(dir_name, model_name+"_tx_to_reassign.parquet"))
+            self.tx_to_remove.to_parquet(os.path.join(dir_name, model_name+"_tx_to_remove.parquet"))
+            
     def load_model(self,
                    dir_name: str,
                    model_name: str) -> None:
@@ -618,10 +717,12 @@ class misc(nn.Module):
         self.current_layer = model_meta['current_layer']
         self.prior_50_reassign_prob = model_meta['prior_50_reassign_prob']
         self.prior_5_reassign_prob = model_meta['prior_5_reassign_prob']
-        save_reassigning_result = model_meta['save_reassigning_result']
+        save_correction_result = model_meta['save_correction_result']
         
-        if save_reassigning_result:
+        if save_correction_result:
+            self.criterion_df = pd.read_csv(os.path.join(dir_name, model_name+"_criteria_df.csv"))
             self.tx_to_reassign = pd.read_parquet(os.path.join(dir_name, model_name+"_tx_to_reassign.parquet"))
+            self.tx_to_remove = pd.read_parquet(os.path.join(dir_name, model_name+"_tx_to_remove.parquet"))
         
         self.initialize_parameters()
         checkpoint = torch.load(os.path.join(dir_name, model_name+".pt")) 
