@@ -596,7 +596,7 @@ class misc(nn.Module):
                 loss = 0
                 with torch.no_grad():
                     for X, leiden in zip(X_chunks, leiden_chunks):
-                        X_chunks = torch.tensor(X, dtype=torch.float32, device=self.model_device)
+                        X = torch.tensor(X, dtype=torch.float32, device=self.model_device)
                         leiden = torch.tensor(leiden, dtype=torch.int64, device=self.model_device)
                         cell_type_logits = self.cell_type_coefficients(X)
                         loss += F.cross_entropy(cell_type_logits, leiden, reduction='sum').cpu().numpy().item()
