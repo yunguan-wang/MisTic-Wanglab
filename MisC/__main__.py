@@ -80,9 +80,10 @@ parser.add_argument("--n_epochs", type=int, default=20,
                     help="Number of epochs")
 
 # reassign tx 
-parser.add_argument("--criteria", type=float, default=0.5,
-                    help="Threshold on reassigning the transcript")
-
+parser.add_argument("--reassign_threshold_grid", nargs='+', default=[0.1, 0.2, 0.3, 0.4, 0.5],
+                    help="An array of reassign threshold to try.")
+parser.add_argument("--remove_threshold_grid", nargs='+', default=[0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1],
+                    help="An array of remove threshold in percentage of reassign threshold to try.")
 # Model saving 
 parser.add_argument("--dir_name", type=str, default=".",
                     help="The directory path at which the saved model should be.")
@@ -152,14 +153,16 @@ def main(cmdargs: argparse.Namespace):
     m.training_loop(n_epochs=n_epochs)
     m.compute_reassign_probs()
     
-    criteria = {"threshold": cmdargs.criteria}
-    m.reassign_tx(criteria=criteria)
+    
+    reassign_threshold_grid = [float(c) for c in cmdargs.reassign_threshold_grid]
+    remove_threshold_grid = [float(c) for c in cmdargs.remove_threshold_grid]
+    m.correct_tx(reassign_threshold_grid=reassign_threshold_grid,
+                 remove_threshold_grid=remove_threshold_grid)
     
     # saving model 
     m.save_model(dir_name=cmdargs.dir_name,
                  model_name=cmdargs.model_name,
-                 save_reassigning_result=True,
-                 selected_criterion='threshold')
+                 save_correction_result=True)
     sys.exit(0)
 
 

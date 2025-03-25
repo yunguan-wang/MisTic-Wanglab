@@ -10,11 +10,14 @@ import polars as pl
 import re 
 import numpy as np
 from scipy.special import betainc
+from scipy.spatial import KDTree
+from scipy.signal import find_peaks, peak_widths
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from shapely import distance
-from scipy.spatial import KDTree
+# User entertainment
+from tqdm.auto import tqdm
 # Typing and other info
 from typing import Optional, Union, Tuple, Callable
 from time import perf_counter
@@ -387,7 +390,8 @@ def extract_layer_num(layer: str) -> int:
     
 
 def generate_count_patches(adata: sc.AnnData,
-                           tx_to_reassign: pl.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
+                           tx_to_reassign: pl.DataFrame,
+                           tx_to_remove: pl.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """Based on the transcript reassignment, generate patches to update the current count matrix 
 
     Parameters
@@ -396,34 +400,42 @@ def generate_count_patches(adata: sc.AnnData,
         An AnnData to be updated 
     tx_to_reassign : pl.DataFrame
         Transcripts that should be reassigned
+    tx_to_remove : pl.DataFrame
+        Transcripts that should be removed
 
     Returns
     -------
     Tuple[pd.DataFrame, pd.DataFrame]
         The first dataframe contains counts that should be subtracted from the current count
         The second dataframe contains counts that should be added to the current count
+        The third dataframe contains counts that should be subtracted from the current count
     """
-    # Generate two patches for the count matrix 
+    # Generate three patches for the count matrix 
     counts_to_subtract = pd.DataFrame(0, index=adata.obs_names, columns=adata.var_names)
     counts_to_add = pd.DataFrame(0, index=adata.obs_names, columns=adata.var_names)
+    rm_counts_to_subtract = pd.DataFrame(0, index=adata.obs_names, columns=adata.var_names)
     # For removal, we for each cell count how many genes occured 
     cell_to_remove = tx_to_reassign.group_by(['cell_id', "gene"]).len().to_pandas()
+    rm_cell_to_remove = tx_to_remove.group_by(['cell_id', "gene"]).len().to_pandas()
     # For addition, we for each cell in the neighbor count how many genes occured 
     cell_to_add = tx_to_reassign.group_by(['neighbor_cell_id', "gene"]).len().to_pandas()
     cell_to_add.rename(columns={"neighbor_cell_id": "cell_id"}, inplace=True)
     # Transform the dataframe from long to wide 
     subtract_patch = pd.pivot(cell_to_remove, values="len", columns="gene", index='cell_id').fillna(0)
     add_patch = pd.pivot(cell_to_add, values="len", columns="gene", index='cell_id').fillna(0)
+    rm_subtract_patch = pd.pivot(rm_cell_to_remove, values="len", columns="gene", index='cell_id').fillna(0)
     # The update the find matching rows and columns 
     counts_to_subtract.update(subtract_patch)
     counts_to_add.update(add_patch)
+    rm_counts_to_subtract.update(rm_subtract_patch)
     
-    return counts_to_subtract, counts_to_add
+    return counts_to_subtract, counts_to_add, rm_counts_to_subtract
 
 
 def make_reassignment_adata(adata: sc.AnnData,
                             layer: str,
                             tx_to_reassign: pl.DataFrame,
+                            tx_to_remove: pl.DataFrame,
                             trial_layer: Optional[str]=None,
                             dr_method: str='pca') -> sc.AnnData:
     """Make the count adjustment on the adata alone 
@@ -437,6 +449,8 @@ def make_reassignment_adata(adata: sc.AnnData,
         The layer upon which the update is computed 
     tx_to_reassign : pl.DataFrame
         Transcripts that should be reassigned
+    tx_to_remove : pl.DataFrame
+        Transcripts that should be removed
     trial_layer : Optional[str] 
         If provided, the updated counts will be stored in this layer 
     dr_method : str, optional
@@ -447,14 +461,15 @@ def make_reassignment_adata(adata: sc.AnnData,
         The adjusted adata
     """
     with process_time_ram("Updating gene counts") as ctm: 
-        counts_to_subtract, counts_to_add = generate_count_patches(adata=adata,
-                                                                tx_to_reassign=tx_to_reassign)
+        counts_to_subtract, counts_to_add, rm_counts_to_subtract = generate_count_patches(adata=adata,
+                                                                                        tx_to_reassign=tx_to_reassign,
+                                                                                        tx_to_remove=tx_to_remove)
         layer_num = extract_layer_num(layer)
         if trial_layer is None:
             trial_layer = "counts_"+str(int(layer_num+1))
             
         # Update adata
-        adata.layers[trial_layer] = adata.layers[layer]+counts_to_add-counts_to_subtract 
+        adata.layers[trial_layer] = adata.layers[layer]+counts_to_add-counts_to_subtract-rm_counts_to_subtract
         if np.any(adata.layers[trial_layer]<0):
             raise Exception("Negative values generated. This might be due inconsistency between the count matrix and the tx data.")
         adata = process_adata(adata=adata, layer=trial_layer, dr_method=dr_method)
@@ -546,6 +561,47 @@ def calibrate_threshold(alpha_0: np.array,
     def calibrator(x: np.array) -> Callable:
         return betainc(a, 1, x)
     return calibrator
+
+
+def compute_gene_threshold(adata: sc.AnnData,
+                        tx_reassign_info: pl.DataFrame) -> pl.DataFrame:
+    """Compute reassignment thresholds for all the genes 
+
+    Parameters
+    ----------
+    adata : sc.AnnData
+        An Anndata containing gene information 
+    tx_reassign_info : pl.DataFrame
+        A polars dataframe with reassigning probabilities
+
+    Returns
+    -------
+    pl.DataFrame
+        A dataframe with a threshold for each gene 
+    """
+    all_genes = adata.var.index
+    result = pl.DataFrame(data={"gene": all_genes, 
+                                "threshold":0.0})
+    for n_row, gene in tqdm(enumerate(all_genes)): 
+        reassign_probs = tx_reassign_info.filter(pl.col('gene')==gene)['reassign_probs'] 
+        smoothed_counts, bin_edges = np.histogram(reassign_probs, bins=30)
+        # Detect peaks with prominence filter to avoid false positives
+        peaks, _ = find_peaks(smoothed_counts, height=5, prominence=20)
+        # Calculate peak widths with adjusted rel_height
+        results_half = peak_widths(smoothed_counts, peaks, rel_height=1)
+        # Extract and correct `left_ips` values
+        left_ips_corrected = np.maximum(results_half[2], 0)
+        if left_ips_corrected.shape[0] > 0:
+            l_index = round(left_ips_corrected[-1])
+            threshold = bin_edges[l_index]
+        else:
+            # If no peak is found, we set the threshold to 0.5
+            threshold = 0.5
+        if threshold < 0.5:
+            # If the threshold is less than 0.5, we raise it to 0.5
+            threshold = 0.5
+        result[n_row, "threshold"] = threshold
+    return result
 
 
 class diagLinear(nn.Module):
