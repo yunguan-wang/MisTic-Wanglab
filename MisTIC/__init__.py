@@ -1,7 +1,7 @@
 """
-MisC
+MisTIC
 
 An algorithm to reassign transcripts 
 """
 
-from MisC.misc_class import misc
+from MisTIC.mistic_class import mistic

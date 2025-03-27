@@ -1,6 +1,6 @@
 ![Logo](/assets/logo.png)
 
-# MisC
+# MisTIC
 > A probabilistic model for correcting mis-assigned transcripts due to cell segmentation error in imaging-based spatial transcriptomics. It builds on top of [PyTorch] and [scanpy].
 
 ![forthebadge](/assets/spatial-transcriptomics.svg)
@@ -13,37 +13,37 @@
 So far, we have only tested the software on Python 3.9 and 3.10.
 
 ```shell
-conda create -n misc python=3.9
-conda activate misc 
+conda create -n mistic python=3.9
+conda activate mistic 
 ```
 
 or 
 
 ```shell
-conda create -n misc python=3.10
-conda activate misc 
+conda create -n mistic python=3.10
+conda activate mistic 
 ```
 
 ### Build the package
 
 #### pip 
 
-For a stable version of MisC, you can download and install the package via 
+For a stable version of MisTIC, you can download and install the package via 
 
 ```shell
-pip install txMisC
+pip install txMisTIC
 ```
 
 #### Local 
 
-The latest version of MisC will be hosted on GitHub where we constantly update features of the package. To use the latest version of MisC, you will need to build the package loacally.
+The latest version of MisTIC will be hosted on GitHub where we constantly update features of the package. To use the latest version of MisTIC, you will need to build the package loacally.
 
 First, you need to clone the repo to a local directory, say `./awesome_repos` and `cd` to that folder. 
 
-Now, you should have a `MisC` folder under the `awesome_repos` directory. Run the following to build the package.
+Now, you should have a `MisTIC` folder under the `awesome_repos` directory. Run the following to build the package.
 
 ```shell 
-cd ./MisC
+cd ./MisTIC
 python setup.py sdist bdist_wheel
 ```
 
@@ -51,7 +51,7 @@ You should see a `dist` folder now which contains the wheel file you will need f
 
 ```shell
 cd ./dist
-pip install ./txMisC-0.0.1-py3-none-any.whl
+pip install ./txMisTIC-0.0.1-py3-none-any.whl
 ```
 
 ### Dependencies 
@@ -76,13 +76,13 @@ With both package building strategies, the dependencies should be installed auto
 The comprehensive documentation is hosted [here](https://google.com) with the support of [readthedoc]. 
 
 ### Interactive Python 
-This assumes that you are using Jupyter notebook to run MisC.
+This assumes that you are using Jupyter notebook to run MisTIC.
 
 1. Object instantiation and data importing 
 ```python
->>> from MisC.misc_class import misc
+>>> from MisTIC.mistic_class import mistic
 >>> # Check and specify the column names!
->>> m = misc("MAKE/SURE/TO/CHECK/COLUMN/NAMES!!!",
+>>> m = mistic("MAKE/SURE/TO/CHECK/COLUMN/NAMES!!!",
             model_device="cpu")
 >>> # cell_by_gene_counts is optional
 >>> cell_by_gene_counts = "PATH/TO/COUNTS"
@@ -95,7 +95,7 @@ This assumes that you are using Jupyter notebook to run MisC.
                     detected_transcripts=detected_transcripts)
 ```
 
-This will not only import the data into the `misc` object, but also perform data curation and generate features necessary for model training and transcript reassignment. 
+This will not only import the data into the `mistic` object, but also perform data curation and generate features necessary for model training and transcript reassignment. 
 
 Note that the function will create a `molecule_id` column for the `detected_transcripts` file. The first record will be `tx_0`, the second will be `tx_1`, etc..
 
@@ -125,17 +125,17 @@ separate threshold will be generated. For example, if the `reassign_threshold=0.
 >>> m.correct_tx(reassign_threshold_grid=np.arange(start=0.1, stop=0.5, step=0.1),
                 remove_threshold_grid=np.linspace(start=0, stop=1, num=10))
 >>> m.save_model(dir_name="PATH/TO/DIRECTORY",
-                    model_name="misc",
+                    model_name="mistic",
                     save_correction_result=True)
 ```
 
-This will save PyTorch model `misc.pt` along with some meta information `misc_meta.json`. In addition, by specifying `save_correction_result=True` the transcripts that will be reassigned/removed will be save as `misc_tx_to_reassign.parquet`/`misc_tx_to_remove.parquet`. 
+This will save PyTorch model `mistic.pt` along with some meta information `mistic_meta.json`. In addition, by specifying `save_correction_result=True` the transcripts that will be reassigned/removed will be save as `mistic_tx_to_reassign.parquet`/`mistic_tx_to_remove.parquet`. 
 
 This `.parquet` file contains a dataframe with four columns `molecule_id`, `from_cell_id`, `to_cell_id`, and `gene`. 
 
 The ids contained in the `molecule_id` column correspond to the row numbers of the original `detected_transcripts` file. Therefore, `tx_0` corresponds to the first record in the `detected_transcripts` file.
 
-`misc_criterion_df.csv` contains the loss computed based on various combinations of thresholds. 
+`mistic_criterion_df.csv` contains the loss computed based on various combinations of thresholds. 
 
 If you are also interested in the computed reassigning probabilities, you can assess them via  
 
@@ -150,13 +150,13 @@ We do not provide a function to save this polars dataframe as it could be large.
 Loading the saved model could be useful if you turned off the program but wanted to take a closer look at the results later on. As previously stated, since not all information is saved with the model, you will need to import the data again.
 
 ```python
->>> from MisC.misc_class import misc
+>>> from MisTIC.mistic_class import mistic
 >>> # Check and specify the column names!
->>> m = misc("MAKE/SURE/TO/CHECK/COLUMN/NAMES!!!",
+>>> m = mistic("MAKE/SURE/TO/CHECK/COLUMN/NAMES!!!",
             model_device="cpu")
 >>> # Load the model 
 >>> m.load_model(dir_name="PATH/TO/DIRECTORY",
-                    model_name="misc",)
+                    model_name="mistic",)
 >>> # cell_by_gene_counts is optional
 >>> cell_by_gene_counts = "PATH/TO/COUNTS"
 >>> detected_transcripts = 'PATH/TO/TX'
@@ -177,10 +177,10 @@ That's it~
 
 The arguments for CLI is almost identical to those in the interactive Python with only `cell_centroid_x_col` and `cell_centroid_y_col` being amalgamated into `--cell_centroid_x_y_col` and `tx_x_col` and `tx_y_col` into `--tx_x_y_col`.
 
-By default, MisC will save the model to the current directory and the name of the model will be `misc`.
+By default, MisTIC will save the model to the current directory and the name of the model will be `mistic`.
 
 ```shell
-python -m MisC --cell_centroid_x_y_col x y 
+python -m MisTIC --cell_centroid_x_y_col x y 
                 --tx_x_y_col X Y 
                 --cell_metadata PATH/TO/META
                 --cell_boundary_polygons PATH/TO/POLYGONS

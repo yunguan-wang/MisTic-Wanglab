@@ -14,18 +14,18 @@ from torch import optim
 import torch.nn.functional as F
 import torch.nn.utils.parametrize as parametrize
 # Utility function 
-from MisC.utility import import_data, calculate_mask_distance, binary_gumbel_softmax_sample,\
+from MisTIC.utility import import_data, calculate_mask_distance, binary_gumbel_softmax_sample,\
         make_reassignment_adata, calibrate_threshold, compute_gene_threshold, generate_count_patches,\
             diagLinear, Positive, JSONEncoder, even_split
-from MisC.generate_tx_feature import generate_feature
-from MisC.data_loader import generate_patch_coords, load_patch
+from MisTIC.generate_tx_feature import generate_feature
+from MisTIC.data_loader import generate_patch_coords, load_patch
 # User entertainment
 from tqdm.auto import tqdm
 # Typing 
 from typing import Union, Optional, Tuple 
 
 
-class misc(nn.Module):
+class mistic(nn.Module):
     def __init__(self,
                 cell_centroid_x_col: str='center_x',
                 cell_centroid_y_col: str='center_y',
@@ -43,7 +43,7 @@ class misc(nn.Module):
                 prior_5_reassign_prob: float=0.99,
                 seed: int=42,
                 model_device: Optional[Union[str, torch.device]] = None) -> None:
-        """Instantiate a misc object 
+        """Instantiate a mistic object 
 
         Parameters
         ----------
