@@ -1,5 +1,5 @@
-__title__ = "txMisC"
+__title__ = "MisTIC"
 __description__ = "An algorithm to reassign transcripts"
 __version__ = "0.0.1"
-__author__ = "misc developers"
+__author__ = "misticc developers"
 __authoremail__ = "@.edu; @.edu; @.edu"

@@ -8,12 +8,12 @@ from sklearn import preprocessing
 import matplotlib as mpl 
 import matplotlib.pyplot as plt 
 # Typing 
-from MisC.misc_class import misc 
+from MisTIC.mistic_class import mistic 
 from typing import Optional 
 
 
 def inspect_cell(cell_id: str,
-                 m: misc,
+                 m: mistic,
                  gene: Optional[str]=None,
                  neighbor_index: Optional[int]=None, 
                  inspect: str="reassign_probs",
@@ -25,8 +25,8 @@ def inspect_cell(cell_id: str,
     ----------
     cell_id : str
         Cell id 
-    m : misc
-        The misc object 
+    m : mistic
+        The mistic object 
     gene : Optional[str], optional
         Name of a gene. If None, then all genes will be shown, by default None
     neighbor_index : Optional[int], optional

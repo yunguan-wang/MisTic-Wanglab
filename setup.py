@@ -3,7 +3,7 @@ import re
 import os 
 
 
-VERSIONFILE="MisC/__version__.py"
+VERSIONFILE="MisTIC/__version__.py"
 verstrline = open(VERSIONFILE, "rt").read()
 # Version 
 VSRE = r"^__version__ = ['\"]([^'\"]*)['\"]"
@@ -59,7 +59,7 @@ setup(
     author_email=AUTHOREMAIL,
     long_description_content_type="text/markdown",
     long_description=open("README.md").read(),
-    packages=["MisC"],
+    packages=["MisTIC"],
     python_requires=">=3.9,<3.11",
     install_requires=install_requires,
     test_requires=[

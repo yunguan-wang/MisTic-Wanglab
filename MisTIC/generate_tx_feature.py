@@ -12,7 +12,7 @@ from pydeseq2.utils import get_num_processes
 from shapely import distance
 from scipy.spatial import KDTree
 # User entertainment
-from MisC.utility import process_time_ram
+from MisTIC.utility import process_time_ram
 from tqdm.auto import tqdm
 # Typing 
 from typing import Tuple

@@ -1,6 +1,6 @@
-"""The Command-Line Interface (CLI) of MisC
+"""The Command-Line Interface (CLI) of MisTIC
 
-The CLI of MisC can be accessed via ``python -m MisC``.
+The CLI of MisTIC can be accessed via ``python -m MisTIC``.
 
 :Example:
 
@@ -8,14 +8,14 @@ The CLI of MisC can be accessed via ``python -m MisC``.
     
     .. code-block:: bash
 
-        python -m MisC -h
+        python -m MisTIC -h
     
     Check version and authors:
     
     .. code-block:: bash
     
-        python -m MisC --version 
-        python -m MisC --author
+        python -m MisTIC --version 
+        python -m MisTIC --author
 
 """
 
@@ -25,8 +25,8 @@ import sys
 import torch
 import argparse
 
-from MisC.__version__ import __version__, __author__
-from MisC.misc_class import misc
+from MisTIC.__version__ import __version__, __author__
+from MisTIC.mistic_class import mistic
 
 parser = argparse.ArgumentParser(description="Misc")
 
@@ -87,7 +87,7 @@ parser.add_argument("--remove_threshold_grid", nargs='+', default=[0, 0.1, 0.2, 
 # Model saving 
 parser.add_argument("--dir_name", type=str, default=".",
                     help="The directory path at which the saved model should be.")
-parser.add_argument("--model_name", type=str, default="misc",
+parser.add_argument("--model_name", type=str, default="mistic",
                     help="The model name")
 
 # Maybe consider
@@ -95,7 +95,7 @@ parser.add_argument("--model_name", type=str, default="misc",
 
 
 def main(cmdargs: argparse.Namespace):
-    """The main method for MisC
+    """The main method for MisTIC
 
     Parameters:
     ----------
@@ -116,7 +116,7 @@ def main(cmdargs: argparse.Namespace):
     prior_5_reassign_prob = cmdargs.prior_5_reassign_prob
     
     
-    m = misc(cell_centroid_x_col=cell_centroid_x_col,
+    m = mistic(cell_centroid_x_col=cell_centroid_x_col,
              cell_centroid_y_col=cell_centroid_y_col,
             celltype_col=celltype_col,
             tx_x_col=tx_x_col,

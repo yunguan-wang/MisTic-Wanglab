@@ -14,18 +14,18 @@ from torch import optim
 import torch.nn.functional as F
 import torch.nn.utils.parametrize as parametrize
 # Utility function 
-from MisC.utility import import_data, calculate_mask_distance, binary_gumbel_softmax_sample,\
+from MisTIC.utility import import_data, calculate_mask_distance, binary_gumbel_softmax_sample,\
         make_reassignment_adata, calibrate_threshold, compute_gene_threshold, generate_count_patches,\
             diagLinear, Positive, JSONEncoder, even_split
-from MisC.generate_tx_feature import generate_feature
-from MisC.data_loader import generate_patch_coords, load_patch
+from MisTIC.generate_tx_feature import generate_feature
+from MisTIC.data_loader import generate_patch_coords, load_patch
 # User entertainment
 from tqdm.auto import tqdm
 # Typing 
 from typing import Union, Optional, Tuple 
 
 
-class misc(nn.Module):
+class mistic(nn.Module):
     def __init__(self,
                 cell_centroid_x_col: str='center_x',
                 cell_centroid_y_col: str='center_y',
@@ -43,7 +43,7 @@ class misc(nn.Module):
                 prior_5_reassign_prob: float=0.99,
                 seed: int=42,
                 model_device: Optional[Union[str, torch.device]] = None) -> None:
-        """Instantiate a misc object 
+        """Instantiate a mistic object 
 
         Parameters
         ----------
@@ -603,14 +603,16 @@ class misc(nn.Module):
                 loss /= (self.adata.X.shape[0])
                 
                 criterion_df.append((reassign_threshold, remove_threshold, loss, tx_to_remove.shape[0]))
-        self.criterion_df=pd.DataFrame(criterion_df, columns=['reassign_threshold', 'remove_threshold', 'loss', "n_removed"])
+        self.criterion_df=pd.DataFrame(criterion_df, columns=['reassign_threshold', 'remove_threshold_percent', 'loss', "n_removed"])
         # The first would be the best criterion
         self.criterion_df.sort_values("loss", ascending=True, ignore_index=True, inplace=True)
-        self.criterion_df.loc[:, "remove_threshold_raw"] = self.criterion_df.loc[:, 'reassign_threshold'] * (1-self.criterion_df.loc[:, 'remove_threshold'])
-    
+        self.criterion_df.loc[:, "remove_threshold"] = self.criterion_df.loc[:, 'reassign_threshold'] * (1-self.criterion_df.loc[:, 'remove_threshold_percent'])
+        self.criterion_df.loc[:, "loss_increase"] = self.criterion_df.loc[:, 'loss']/self.criterion_df.at[0, 'loss']-1
+        
     def correct_tx(self,
                     reassign_threshold_grid: Union[int, float, np.array, list]=np.arange(start=0.1, stop=0.5, step=0.1),
-                    remove_threshold_grid: Union[int, float, np.array, list]=np.linspace(start=0, stop=1, num=10)) -> None:
+                    remove_threshold_grid: Union[int, float, np.array, list]=np.linspace(start=0, stop=1, num=10),
+                    choice_type: str="conservative") -> None:
         """Generate transcript reassignment based on various criteria 
 
         Parameters
@@ -626,13 +628,25 @@ class misc(nn.Module):
             reassign_threshold_grid = [reassign_threshold_grid]
         if isinstance(remove_threshold_grid, int) or isinstance(remove_threshold_grid, float):
             remove_threshold_grid = [remove_threshold_grid]
-        # Generate cirteria df
-        self._find_criteria(adata_obs=adata_obs,
-                            reassign_threshold_grid=reassign_threshold_grid,
-                            remove_threshold_grid=remove_threshold_grid)
-        # The first one is the best 
-        reassign_threshold = self.criterion_df.at[0, "reassign_threshold"]
-        remove_threshold = self.criterion_df.at[0, "remove_threshold"]
+        if (len(reassign_threshold_grid) > 1) or (len(remove_threshold_grid) > 1):
+            # Generate cirteria df
+            self._find_criteria(adata_obs=adata_obs,
+                                reassign_threshold_grid=reassign_threshold_grid,
+                                remove_threshold_grid=remove_threshold_grid)
+            if choice_type == "best":
+                # The first one is the best 
+                ind = 0
+            elif choice_type == "aggressive":
+                ind = self.criterion_df.loc[self.criterion_df['loss_increase'] < 0.01, 'n_removed'].idxmax(axis=0)
+            elif choice_type == "conservative":
+                ind = self.criterion_df.loc[self.criterion_df['n_removed']==0, 'loss'].idxmin(axis=0)
+            else: 
+                raise ValueError('Invalid choice type')
+            reassign_threshold = self.criterion_df.at[ind, "reassign_threshold"]
+            remove_threshold = self.criterion_df.at[ind, "remove_threshold_percent"]
+        else: 
+            reassign_threshold = reassign_threshold_grid[0]
+            remove_threshold = remove_threshold_grid[0]
         # Generate tx 
         tx_to_reassign, tx_to_remove = self._correct_tx(adata_obs=adata_obs,
                                                         reassign_threshold=reassign_threshold,
