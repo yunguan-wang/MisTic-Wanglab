@@ -42,39 +42,46 @@ def expression_feature(adata: sc.AnnData,
     # To prepare for one-vs-rest comparison, we first construct an augmented dataframe 
     # where the trailing samples are just the original counts that belong to 
     # all the cells except for one type 
-    with process_time_ram("Prepare for DE") as ctm:
-        aug_sample = adata.to_df(layer).copy()
-        aug_sample['leiden'] = adata.obs['leiden'].copy()
-        aug_sample.reset_index(drop=False, names=['cell_id'],inplace=True)
-        for l in tqdm(adata.uns["unique_leiden"], desc="Augmenting sample"):
-            temp_n = np.min([(adata.obs['leiden']==l).sum(),
-                             (adata.obs['leiden']!=l).sum()])
-            temp = adata.to_df(layer).loc[adata.obs['leiden']!=l, :].sample(n=temp_n).copy()
+    counts_df = []
+    for l in tqdm(adata.uns["unique_leiden"], desc="Prepare for DE"):
+        with process_time_ram("Generate psdudo-bulk for {}".format(l)) as ctm:
+            # For each cell type 
+            cell_ind = adata.obs.loc[adata.obs['leiden']==l,:].index
+            rest_ind = adata.obs.loc[adata.obs['leiden']!=l,:].index
+            temp_n = np.min([len(cell_ind), len(rest_ind)])
+            # Subsample to equal sample size 
+            cell_ind = np.random.choice(cell_ind, size=temp_n, replace=False)
+            rest_ind = np.random.choice(rest_ind, size=temp_n, replace=False)
+            # Extract corresponding gene counts 
+            aug_sample = adata[cell_ind].to_df(layer).copy()
+            temp = adata[rest_ind].to_df(layer).copy()
+            # Add cell type info
+            aug_sample['leiden'] = l
             temp['leiden'] = "cell_type_m_"+str(l)
+            aug_sample.reset_index(drop=False, names=['cell_id'],inplace=True) 
             temp.reset_index(drop=False, names=['cell_id'],inplace=True)
             aug_sample = pd.concat([aug_sample, temp], axis=0, join='inner', ignore_index=True)
-    
-    with process_time_ram("Generate psdudo-bulk") as ctm:
-        counts_list = []
-        # split per each cell type into num_rep nonoverlaping chunks 
-        # Shuffle the data 
-        rep_sample = aug_sample.groupby(['leiden'],
-                                        observed=True,
-                                        as_index=True).apply(lambda x: x.sample(frac=1, replace=False),
-                                                            include_groups=False)
-        # The dataframe should only have counts and leiden 
-        rep_sample.reset_index(drop=False, names=['leiden', 'id_to_drop'], inplace=True)
-        rep_sample.drop(columns=['cell_id','id_to_drop'], inplace=True)
-        rep_counts = rep_sample.groupby("leiden", as_index=True).apply(lambda x: np.array_split(x, num_rep), include_groups=False)
-        # Construct pseudo bulk by summing up the counts 
-        for l in rep_counts.index:
-            for rep in range(num_rep):
-                temp = rep_counts[l][rep].sum(axis=0).to_frame().T
-                temp['leiden'] = l
-                counts_list.append(temp)
-        # Concatnate list to a dataframe and use the index as "sample" id
-        counts_df = pd.concat(counts_list, axis=0).reset_index(drop=True)    
-        counts_df["sample_id"] = "Sample"+counts_df.index.astype(str)
+            # split per each cell type into num_rep nonoverlaping chunks 
+            # Shuffle the data 
+            aug_sample = aug_sample.groupby(['leiden'],
+                                            observed=True,
+                                            as_index=True).apply(lambda x: x.sample(frac=1, replace=False),
+                                                                include_groups=False)
+            # The dataframe should only have counts and leiden 
+            aug_sample.reset_index(drop=False, names=['leiden', 'id_to_drop'], inplace=True)
+            aug_sample.drop(columns=['cell_id','id_to_drop'], inplace=True)
+            aug_sample = aug_sample.groupby("leiden", as_index=True).apply(lambda x: np.array_split(x, num_rep), include_groups=False)
+            # Construct pseudo bulk by summing up the counts 
+            for ind in aug_sample.index:
+                for rep in range(num_rep):
+                    temp = aug_sample[ind][rep].sum(axis=0).to_frame().T
+                    temp['leiden'] = ind
+                    counts_df.append(temp)
+    # Concatnate list to a dataframe and use the index as "sample" id
+    counts_df = pd.concat(counts_df, axis=0).reset_index(drop=True)    
+    counts_df["sample_id"] = "Sample"+counts_df.index.astype(str)
+
+    with process_time_ram("Deseq") as ctm:
         # Treat leiden as different "conditions"
         metadata = counts_df[["sample_id", "leiden"]].set_index("sample_id", inplace=False)
         counts_df.drop(columns=['leiden'], inplace=True)
