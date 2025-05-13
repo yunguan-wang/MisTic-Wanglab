@@ -20,7 +20,8 @@ from typing import Tuple
 
 def expression_feature(adata: sc.AnnData,
                         layer: str,
-                        seed: int=42) -> Tuple[pl.DataFrame, pl.DataFrame]:
+                        seed: int=42,
+                        max_de_cells: int=999999) -> Tuple[pl.DataFrame, pl.DataFrame]:
     """Use deseq2 with pseudo bulks to perform differential analysis among different cell types and cell type vs all other cell types 
 
     Parameters
@@ -44,11 +45,11 @@ def expression_feature(adata: sc.AnnData,
     # all the cells except for one type 
     counts_df = []
     for l in tqdm(adata.uns["unique_leiden"], desc="Prepare for DE"):
-        with process_time_ram("Generate psdudo-bulk for {}".format(l)) as ctm:
+        with process_time_ram("Generate pseudo-bulk for {}".format(l)) as ctm:
             # For each cell type 
             cell_ind = adata.obs.loc[adata.obs['leiden']==l,:].index
             rest_ind = adata.obs.loc[adata.obs['leiden']!=l,:].index
-            temp_n = np.min([len(cell_ind), len(rest_ind)])
+            temp_n = np.min([len(cell_ind), len(rest_ind), max_de_cells])
             # Subsample to equal sample size 
             cell_ind = np.random.choice(cell_ind, size=temp_n, replace=False)
             rest_ind = np.random.choice(rest_ind, size=temp_n, replace=False)
@@ -306,7 +307,8 @@ def generate_feature(adata: sc.AnnData,
                     mask_distance: pd.DataFrame, 
                     mask_dist_cutoff: float=5,
                     nearest: int=3,
-                    seed: int=42) -> pl.DataFrame:
+                    seed: int=42,
+                    max_de_cells: int=999999) -> pl.DataFrame:
     """A wrap up function for expression_feature and distance_feature 
 
     Parameters
@@ -342,7 +344,8 @@ def generate_feature(adata: sc.AnnData,
     # Features based on differential analysis 
     exp_1vR_df, prior_exp_1vR_df = expression_feature(adata=adata,
                                                     layer=layer,
-                                                    seed=seed)
+                                                    seed=seed,
+                                                    max_de_cells=max_de_cells)
     with process_time_ram("Combine features") as ctm:
         # Combine the two piceces of information 
         intf_tx = intf_tx.join(exp_1vR_df, how='left',

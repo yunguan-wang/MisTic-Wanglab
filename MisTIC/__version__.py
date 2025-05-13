@@ -1,4 +1,4 @@
-__title__ = "MisTIC"
+__title__ = "txMisTIC"
 __description__ = "An algorithm to reassign transcripts"
 __version__ = "0.0.1"
 __author__ = "misticc developers"

@@ -42,6 +42,7 @@ class mistic(nn.Module):
                 prior_50_reassign_prob: float=0.01,
                 prior_5_reassign_prob: float=0.99,
                 seed: int=42,
+                max_de_cells: int=999999,
                 model_device: Optional[Union[str, torch.device]] = None) -> None:
         """Instantiate a mistic object 
 
@@ -98,7 +99,8 @@ class mistic(nn.Module):
         self.generate_feature_par = {
             'mask_dist_cutoff': mask_dist_cutoff,
             'nearest': nearest,
-            'seed': seed
+            'seed': seed,
+            'max_de_cells': max_de_cells
         }
         
         # Create data 

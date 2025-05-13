@@ -60,6 +60,8 @@ parser.add_argument("--prior_50_reassign_prob", type=float, default=0.01,
                     help="The prior probability of reassigning a transcript that's ranked 50%")
 parser.add_argument("--prior_5_reassign_prob", type=float, default=0.99,
                     help="The prior probability of reassigning a transcript that's ranked 5%")
+parser.add_argument("--max_de_cells", type=int, default=999999,
+                    help="Maximum number of cells for DEG analysis")
 
 # Import data 
 parser.add_argument("--cell_metadata", type=str, required=True,
@@ -114,7 +116,7 @@ def main(cmdargs: argparse.Namespace):
     nearest = cmdargs.nearest
     prior_50_reassign_prob = cmdargs.prior_50_reassign_prob
     prior_5_reassign_prob = cmdargs.prior_5_reassign_prob
-    
+    max_de_cells = cmdargs.max_de_cells
     
     m = mistic(cell_centroid_x_col=cell_centroid_x_col,
              cell_centroid_y_col=cell_centroid_y_col,
@@ -129,7 +131,8 @@ def main(cmdargs: argparse.Namespace):
             mask_dist_cutoff=mask_dist_cutoff,
             nearest=nearest,
             prior_50_reassign_prob=prior_50_reassign_prob,
-            prior_5_reassign_prob=prior_5_reassign_prob)
+            prior_5_reassign_prob=prior_5_reassign_prob,
+            max_de_cells=max_de_cells)
     
     cell_metadata = cmdargs.cell_metadata
     cell_boundary_polygons = cmdargs.cell_boundary_polygons
