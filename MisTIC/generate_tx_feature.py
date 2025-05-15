@@ -12,7 +12,7 @@ from pydeseq2.utils import get_num_processes
 from shapely import distance
 from scipy.spatial import KDTree
 # User entertainment
-from MisTIC.utility import process_time_ram
+from MisTIC.utility import process_time_ram, even_split
 from tqdm.auto import tqdm
 # Typing 
 from typing import Tuple
@@ -21,7 +21,7 @@ from typing import Tuple
 def expression_feature(adata: sc.AnnData,
                         layer: str,
                         seed: int=42,
-                        max_de_cells: int=999999) -> Tuple[pl.DataFrame, pl.DataFrame]:
+                        max_de_cells: int=100000) -> Tuple[pl.DataFrame, pl.DataFrame]:
     """Use deseq2 with pseudo bulks to perform differential analysis among different cell types and cell type vs all other cell types 
 
     Parameters
@@ -134,10 +134,13 @@ def expression_feature(adata: sc.AnnData,
         
         exp_1vR_df.drop(columns=['log2FoldChange', 'padj'], inplace=True)
         exp_1vR_df = pl.from_pandas(exp_1vR_df)
-    
-    with process_time_ram("Perform prior DE") as ctm:
+    ##################
+    # Perform prior DE 
+    with process_time_ram("Prepare for prior DE") as ctm:
+        pl_adata = pl.from_pandas(adata.to_df(layer), include_index=True)
         # Without the celltype information, we first compute the mean of all genes 
         overall_log2_mean = np.log2(adata.to_df(layer).mean(axis=0) + 1).to_frame().T
+    with process_time_ram("Find NNs") as ctm:
         # Based on the DR results, we find the 50NNs
         expression_dist_tree = KDTree(adata.obsm['X_'+adata.uns['dr_method']+'_'+layer])
         _, adj_ind = expression_dist_tree.query(adata.obsm['X_'+adata.uns['dr_method']+'_'+layer], k=50, workers=-1)
@@ -146,26 +149,32 @@ def expression_feature(adata: sc.AnnData,
                                                     values=adata.obs_names)).unpivot(index="cell_id").drop("variable")
         adj = adj.with_columns(pl.Series(name="n",
                             values=adata.obs_names[adj['value']])).drop('value')
-        # Add count information 
-        pl_adata = pl.from_pandas(adata.to_df(layer), include_index=True)
-        adj = adj.join(pl_adata, how='left', left_on="n", right_on='cell_id').drop("n")
-        # Compute mean 
-        gene_col = [col_n for col_n in adj.columns if col_n != "cell_id"]
-        adj = adj.group_by('cell_id').mean().with_columns(pl.col(gene) + 1 for gene in gene_col)
-        # Find log2 fold changes 
-        log2fc = adj.with_columns(pl.col(gene).log(base=2) - overall_log2_mean[gene] for gene in gene_col)
-        # Generate Features 
-        log2fc_rank = log2fc.select(["cell_id",
-                        pl.concat_list(pl.exclude("cell_id"))
-                        .list.eval(pl.element().rank(descending=True)/pl.element().count()*0.999).alias("rank").list.to_struct(
-                            fields=gene_col,
-                            n_field_strategy="max_width")]).unnest("rank")
-        
-        log2fc_feature = log2fc_rank.with_columns(pl.col(gene).log()-(1-pl.col(gene)).log() for gene in gene_col)
-        # Wide to long form 
-        prior_exp_1vR_df = log2fc_feature.unpivot(index="cell_id")
-        prior_exp_1vR_df = prior_exp_1vR_df.rename({"value": "prior_rest_self_exp_feature",
-                                                    "variable": 'gene'})
+        # Split cells into small chunks 
+        cell_id_list = even_split(adata.obs.index.to_numpy(), 1000)
+    prior_exp_1vR_df = []
+    for counter, cell_ids in enumerate(tqdm(cell_id_list)):
+        with process_time_ram("Add count information: chunk "+str(counter)) as ctm:
+            sub_adj = adj.filter(pl.col("cell_id").is_in(cell_ids)).join(pl_adata, how='left', left_on="n", right_on='cell_id').drop("n")
+        with process_time_ram("Compute mean: chunk "+str(counter)) as ctm:
+            gene_col = [col_n for col_n in sub_adj.columns if col_n != "cell_id"]
+            sub_adj = sub_adj.group_by('cell_id').mean().with_columns(pl.col(gene) + 1 for gene in gene_col)
+        with process_time_ram("Generate Features: chunk "+str(counter)) as ctm:
+            # Find log2 fold changes
+            log2fc = sub_adj.with_columns(pl.col(gene).log(base=2) - overall_log2_mean[gene] for gene in gene_col)
+            # Generate Features 
+            log2fc_rank = log2fc.select(["cell_id",
+                            pl.concat_list(pl.exclude("cell_id"))
+                            .list.eval(pl.element().rank(descending=True)/pl.element().count()*0.999).alias("rank").list.to_struct(
+                                fields=gene_col,
+                                n_field_strategy="max_width")]).unnest("rank")
+            
+            log2fc_feature = log2fc_rank.with_columns(pl.col(gene).log()-(1-pl.col(gene)).log() for gene in gene_col)
+        with process_time_ram("Wide to long form : chunk "+str(counter)) as ctm:
+            temp = log2fc_feature.unpivot(index="cell_id")
+            temp = temp.rename({"value": "prior_rest_self_exp_feature",
+                                "variable": 'gene'})
+            prior_exp_1vR_df.append(temp)
+    prior_exp_1vR_df = pl.concat(prior_exp_1vR_df, how='vertical')
 
     return exp_1vR_df, prior_exp_1vR_df
 

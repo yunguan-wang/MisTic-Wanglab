@@ -60,7 +60,7 @@ parser.add_argument("--prior_50_reassign_prob", type=float, default=0.01,
                     help="The prior probability of reassigning a transcript that's ranked 50%")
 parser.add_argument("--prior_5_reassign_prob", type=float, default=0.99,
                     help="The prior probability of reassigning a transcript that's ranked 5%")
-parser.add_argument("--max_de_cells", type=int, default=999999,
+parser.add_argument("--max_de_cells", type=int, default=100000,
                     help="Maximum number of cells for DEG analysis")
 
 # Import data 

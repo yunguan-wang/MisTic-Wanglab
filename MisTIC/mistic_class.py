@@ -42,7 +42,7 @@ class mistic(nn.Module):
                 prior_50_reassign_prob: float=0.01,
                 prior_5_reassign_prob: float=0.99,
                 seed: int=42,
-                max_de_cells: int=999999,
+                max_de_cells: int=100000,
                 model_device: Optional[Union[str, torch.device]] = None) -> None:
         """Instantiate a mistic object 
 
