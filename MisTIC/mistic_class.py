@@ -7,7 +7,8 @@ import geopandas as gpd
 import polars as pl 
 # Data manipulation 
 import numpy as np
-from scipy.stats import ks_2samp
+from scipy.special import softmax
+from scipy.stats import ks_2samp, entropy
 import torch 
 import torch.nn as nn 
 from torch import optim
@@ -672,7 +673,105 @@ class mistic(nn.Module):
         
         self.tx_to_reassign = tx_to_reassign.to_pandas().copy()
         self.tx_to_remove = tx_to_remove.to_pandas().copy()
+    
+    def recluster(self,
+                temperature: float=0.0,
+                top_k: Optional[int]=None,
+                new_layer: Optional[str]=None,
+                overwrite_previous_trials: bool=False,
+                update_leiden: bool=False) -> None:
+        """Regenerate the clusters 
+
+        Parameters
+        ----------
+        temperature : float, optional
+            Temperature in sampling multinomial, by default 0.0
+        top_k : Optional[int], optional
+            Only the top k candidates will be sampled, by default None
+        new_layer : Optional[str], optional
+            Layer upon which the logits will be computed, by default None
+        overwrite_previous_trials : bool, optional 
+            Whether or not to overwrite previous trials at the same layer. This is useful is the user
+            changes to the reassign criteria, by default False
+        update_leiden : bool, optional
+            Whether or not to update the latest leiden information. This is useful when the user 
+            is really confident about the reclassification results, by default False
+        """
+        if new_layer is None:
+            new_layer = self.current_layer+"_corrected"
+        self.eval()
+        with torch.no_grad():
+            cell_by_gene_counts_chunks = even_split(array=self.adata.layers[new_layer],
+                                                    chunk_size=np.ceil(self.adata.X.shape[0]/100))
+            logits = torch.empty((0, self.adata.uns["n_leiden"]), dtype=torch.float32)
+            cell_type_predict = torch.empty((0, 1), dtype=torch.int64)
+            for cell_by_gene_counts_chunk in tqdm(cell_by_gene_counts_chunks):
+                logits_chunk = self.cell_type_coefficients(torch.tensor(cell_by_gene_counts_chunk,
+                                                                dtype=torch.float32, 
+                                                                device=self.model_device)).cpu()
+                logits = torch.cat((logits, logits_chunk), dim=0)
+                # For top k, the -inf mask trick is used 
+                if top_k is not None:
+                    top_logits, _ = torch.topk(logits_chunk, top_k)
+                    min_val = top_logits[:, -1]
+                    logits_chunk = torch.where(
+                        logits_chunk < min_val,
+                        torch.tensor(float('-inf')).to(logits.device),
+                        logits_chunk
+                    )
+                # If temperature is not 0, we sample from multinomial 
+                if temperature > 0.0:
+                    logits_chunk = logits_chunk/temperature
+                    probs = torch.softmax(logits_chunk, dim=-1)
+                    cell_type_predict_chunk = torch.multinomial(probs, num_samples=1)
+                else:
+                    cell_type_predict_chunk = torch.argmax(logits_chunk, dim=-1, keepdim=True)
+                cell_type_predict = torch.cat((cell_type_predict, cell_type_predict_chunk), dim=0)
+        # Record the results 
+        cell_type_predict = cell_type_predict.numpy()
+        logits = logits.numpy()
+        probs = softmax(logits, axis=1)
+        # perplexity is also computed to see how uncertain the model is 
+        perplexity = np.exp(entropy(probs, axis=1, keepdims=True))
+        # If the user wants to overwrite previous trials
+        # we detect previous trials of the same layer and drop the columns 
+        if overwrite_previous_trials:
+            previous_trials = []
+            i=0
+            while True:
+                new_leiden_name = new_layer + "_leiden_" + str(i)
+                if new_leiden_name in self.adata.obs.columns:
+                    previous_trials.append(new_leiden_name)
+                    previous_trials.append(new_layer + "_cell_type_" + str(i))
+                    previous_trials.append(new_leiden_name+"_perplexity")
+                else:
+                    break
+                i += 1
+            self.adata.obs.drop(columns=previous_trials, inplace=True)
+        # To allow the user to recluster multiple times 
+        # by running the recluster method multiple times 
+        # The first time the user runs recluster, the index will be 0
+        # after that every time the user runs recluster, the index will 
+        # increment by 1
+        i=0
+        while True:
+            new_leiden_name = new_layer + "_leiden_" + str(i)
+            new_cell_type_name = new_layer + "_cell_type_" + str(i)
+            if new_leiden_name not in self.adata.obs.columns:
+                break 
+            i += 1
+        self.adata.obs[new_leiden_name] = cell_type_predict
+        self.adata.obs[new_leiden_name] = self.adata.obs[new_leiden_name].astype(str)
         
+        temp_df = self.adata.obs[[new_leiden_name]].merge(self.adata.uns['cell_type_leiden_map'],
+                                            how='left', left_on = new_leiden_name,
+                                            right_on = "cell_type_index")
+        self.adata.obs[new_cell_type_name] = temp_df['cell_type_name'].values.copy()
+        
+        self.adata.obs[new_leiden_name+"_perplexity"] = perplexity
+        if update_leiden:
+            self.adata.obs['leiden'] = self.adata.obs[new_leiden_name].copy()
+    
     def save_model(self,
                    dir_name: str,
                    model_name: str,

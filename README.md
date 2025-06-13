@@ -124,6 +124,25 @@ separate threshold will be generated. For example, if the `reassign_threshold=0.
 >>> m.compute_reassign_probs()
 >>> m.correct_tx(reassign_threshold_grid=np.arange(start=0.1, stop=0.5, step=0.1),
                 remove_threshold_grid=np.linspace(start=0, stop=1, num=10))
+```
+
+4. Cell reclustering (optional)
+
+Once the reassignment/removal threshold has been chosen, the users can "reclassify" the cells using the trained classification head which is just a linear logistic regression.
+
+Note that cell type classification is NOT the main purpose of MisTIC and the classification is only intended for providing some guidance to transcript reassignment during training. Therefore, we do not guarantee the accuracy of the classification head. 
+
+Nevertheless, if the users are curious about how the cell types change before and after the correction, we do provide a function for this purpose: 
+
+```python
+>>> m.recluster()
+```
+
+5. Model saving 
+
+To save the model, simply do the following: 
+
+```python
 >>> m.save_model(dir_name="PATH/TO/DIRECTORY",
                     model_name="mistic",
                     save_correction_result=True)
@@ -145,7 +164,7 @@ If you are also interested in the computed reassigning probabilities, you can as
 
 We do not provide a function to save this polars dataframe as it could be large. However, recomputing it would not take too long. 
 
-4. Model loading 
+6. Model loading 
 
 Loading the saved model could be useful if you turned off the program but wanted to take a closer look at the results later on. As previously stated, since not all information is saved with the model, you will need to import the data again.
 
