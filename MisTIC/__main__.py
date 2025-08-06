@@ -84,7 +84,7 @@ parser.add_argument("--n_epochs", type=int, default=20,
 # reassign tx 
 parser.add_argument("--reassign_threshold_grid", nargs='+', default=[0.1, 0.2, 0.3, 0.4, 0.5],
                     help="An array of reassign threshold to try.")
-parser.add_argument("--remove_threshold_grid", nargs='+', default=[0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1],
+parser.add_argument("--remove_threshold_grid", nargs='+', default=[0, 0.1, 0.2, 0.3],
                     help="An array of remove threshold in percentage of reassign threshold to try.")
 # Model saving 
 parser.add_argument("--dir_name", type=str, default=".",
@@ -155,7 +155,6 @@ def main(cmdargs: argparse.Namespace):
     
     m.training_loop(n_epochs=n_epochs)
     m.compute_reassign_probs()
-    
     
     reassign_threshold_grid = [float(c) for c in cmdargs.reassign_threshold_grid]
     remove_threshold_grid = [float(c) for c in cmdargs.remove_threshold_grid]
