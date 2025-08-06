@@ -23,7 +23,6 @@ jobs:
           pip install -r requirements.txt
           python setup.py install
       - name: Test with pytest
-        if: false
         run: |
           pytest --cov MisTIC --cov-report xml
       - name: Upload coverage to Codecov
