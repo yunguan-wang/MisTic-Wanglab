@@ -49,9 +49,17 @@ python setup.py sdist bdist_wheel
 
 You should see a `dist` folder now which contains the wheel file you will need for installing the package. 
 
+Remember to change the `VERSION` to match the file you see in the `dist` folder.
+
 ```shell
 cd ./dist
-pip install ./txMisTIC-0.0.1-py3-none-any.whl
+pip install ./txMisTIC-VERSION-py3-none-any.whl
+```
+
+Once you have installed the package, you can quickly test if the installation is successful via 
+
+```shell
+python -m MisTIC --version
 ```
 
 ### Dependencies 
@@ -71,9 +79,7 @@ With both package building strategies, the dependencies should be installed auto
 - jupyter
 - ipywidgets
 
-## Quick start :fast_forward:
-
-The comprehensive documentation is hosted [here](https://google.com) with the support of [readthedoc]. 
+## Tutorial :fast_forward:
 
 ### Interactive Python 
 This assumes that you are using Jupyter notebook to run MisTIC.
@@ -113,7 +119,7 @@ Note that the algorithm will not necessarily train `20` epochs due to the implem
 
 3. Transcript correction
 
-We allow users to specify two grids over which to search for the best combination of threshods.
+We allow users to specify two grids over which to search for the best combination of thresholds.
 
 `reassign_threshold_grid` should be an array/list of numbers within [0, 1]. Transcripts with `reassign_probs` greater than the threshold will be reassigned. 
 
@@ -123,7 +129,7 @@ separate threshold will be generated. For example, if the `reassign_threshold=0.
 ```python
 >>> m.compute_reassign_probs()
 >>> m.correct_tx(reassign_threshold_grid=np.arange(start=0.1, stop=0.5, step=0.1),
-                remove_threshold_grid=np.linspace(start=0, stop=1, num=10))
+                remove_threshold_grid=np.linspace(start=0, stop=0.3, step=0.1))
 ```
 
 4. Cell reclustering (optional)

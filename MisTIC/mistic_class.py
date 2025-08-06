@@ -614,7 +614,7 @@ class mistic(nn.Module):
         
     def correct_tx(self,
                     reassign_threshold_grid: Union[int, float, np.array, list]=np.arange(start=0.1, stop=0.5, step=0.1),
-                    remove_threshold_grid: Union[int, float, np.array, list]=np.linspace(start=0, stop=1, num=10),
+                    remove_threshold_grid: Union[int, float, np.array, list]=np.linspace(start=0, stop=0.3, step=0.1),
                     choice_type: str="conservative") -> None:
         """Generate transcript reassignment based on various criteria 
 
