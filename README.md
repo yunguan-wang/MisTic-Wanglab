@@ -183,8 +183,8 @@ For didactic decision, we allow users to specify two grids over which to search 
 separate threshold will be generated. For example, if the `reassign_threshold=0.3` and the `remove_threshold=1/3`, the actual threshold will be `0.3*(1-1/3)=0.2`. Transcripts with `reassign_probs` greater than the threshold will be removed. If removal is not desired, simply set `remove_threshold_grid=0`.
 
 ```python
->>> m.correct_tx(reassign_threshold_grid=np.arange(start=0.1, stop=0.5, step=0.1),
-                remove_threshold_grid=np.linspace(start=0, stop=0.3, step=0.1),
+>>> m.correct_tx(reassign_threshold_grid=np.arange(start=0.1, stop=0.6, step=0.1),
+                remove_threshold_grid=np.arange(start=0, stop=0.4, step=0.1),
                 choice_type="best")
 ```
 
@@ -318,7 +318,7 @@ If you use MisTIC in your SRT data analysis workflow, citing [our paper](https:/
 
 ```
 @article{
-    
+
 }
 ```
 

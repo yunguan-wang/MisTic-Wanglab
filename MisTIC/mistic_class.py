@@ -613,8 +613,8 @@ class mistic(nn.Module):
         self.criterion_df.loc[:, "loss_increase"] = self.criterion_df.loc[:, 'loss']/self.criterion_df.at[0, 'loss']-1
         
     def correct_tx(self,
-                    reassign_threshold_grid: Union[int, float, np.array, list]=np.arange(start=0.1, stop=0.5, step=0.1),
-                    remove_threshold_grid: Union[int, float, np.array, list]=np.linspace(start=0, stop=0.3, step=0.1),
+                    reassign_threshold_grid: Union[int, float, np.array, list]=np.arange(start=0.1, stop=0.6, step=0.1),
+                    remove_threshold_grid: Union[int, float, np.array, list]=np.arange(start=0, stop=0.4, step=0.1),
                     choice_type: str="conservative") -> None:
         """Generate transcript reassignment based on various criteria 
 
@@ -713,7 +713,7 @@ class mistic(nn.Module):
                 # For top k, the -inf mask trick is used 
                 if top_k is not None:
                     top_logits, _ = torch.topk(logits_chunk, top_k)
-                    min_val = top_logits[:, -1]
+                    min_val = top_logits[:, [-1]]
                     logits_chunk = torch.where(
                         logits_chunk < min_val,
                         torch.tensor(float('-inf')).to(logits.device),
