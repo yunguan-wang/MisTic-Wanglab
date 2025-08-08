@@ -389,15 +389,15 @@ def extract_layer_num(layer: str) -> int:
     return int(re.findall(r'\d+', layer)[0])
     
 
-def generate_count_patches(adata: sc.AnnData,
+def generate_count_patches(adata: Union[sc.AnnData, pl.DataFrame],
                            tx_to_reassign: pl.DataFrame,
                            tx_to_remove: pl.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """Based on the transcript reassignment, generate patches to update the current count matrix 
 
     Parameters
     ----------
-    adata : sc.AnnData
-        An AnnData to be updated 
+    adata : Union[sc.AnnData, pl.DataFrame]
+        Either an AnnData to be updated or a polars dataframe with all zeros 
     tx_to_reassign : pl.DataFrame
         Transcripts that should be reassigned
     tx_to_remove : pl.DataFrame
@@ -411,23 +411,31 @@ def generate_count_patches(adata: sc.AnnData,
         The third dataframe contains counts that should be subtracted from the current count
     """
     # Generate three patches for the count matrix 
-    counts_to_subtract = pd.DataFrame(0, index=adata.obs_names, columns=adata.var_names)
-    counts_to_add = pd.DataFrame(0, index=adata.obs_names, columns=adata.var_names)
-    rm_counts_to_subtract = pd.DataFrame(0, index=adata.obs_names, columns=adata.var_names)
+    if isinstance(adata, sc.AnnData):
+        # This would be extremely slow
+        counts_to_subtract = pl.from_pandas(pd.DataFrame(0, index=adata.obs_names, columns=adata.var_names), include_index=True)
+        counts_to_add = pl.from_pandas(pd.DataFrame(0, index=adata.obs_names, columns=adata.var_names), include_index=True)
+        rm_counts_to_subtract = pl.from_pandas(pd.DataFrame(0, index=adata.obs_names, columns=adata.var_names), include_index=True)
+    elif isinstance(adata, pl.DataFrame):
+        counts_to_subtract = adata.clone()
+        counts_to_add = adata.clone()
+        rm_counts_to_subtract = adata.clone()
+    else: 
+        raise TypeError("Unknown adata type")
     # For removal, we for each cell count how many genes occured 
-    cell_to_remove = tx_to_reassign.group_by(['cell_id', "gene"]).len().to_pandas()
-    rm_cell_to_remove = tx_to_remove.group_by(['cell_id', "gene"]).len().to_pandas()
+    cell_to_remove = tx_to_reassign.group_by(['cell_id', "gene"]).len()
+    rm_cell_to_remove = tx_to_remove.group_by(['cell_id', "gene"]).len()
     # For addition, we for each cell in the neighbor count how many genes occured 
-    cell_to_add = tx_to_reassign.group_by(['neighbor_cell_id', "gene"]).len().to_pandas()
-    cell_to_add.rename(columns={"neighbor_cell_id": "cell_id"}, inplace=True)
+    cell_to_add = tx_to_reassign.group_by(['neighbor_cell_id', "gene"]).len()
+    cell_to_add = cell_to_add.rename({"neighbor_cell_id": "cell_id"})
     # Transform the dataframe from long to wide 
-    subtract_patch = pd.pivot(cell_to_remove, values="len", columns="gene", index='cell_id').fillna(0)
-    add_patch = pd.pivot(cell_to_add, values="len", columns="gene", index='cell_id').fillna(0)
-    rm_subtract_patch = pd.pivot(rm_cell_to_remove, values="len", columns="gene", index='cell_id').fillna(0)
+    subtract_patch = cell_to_remove.pivot(values="len", on="gene", index='cell_id').fill_null(0)
+    add_patch = cell_to_add.pivot(values="len", on="gene", index='cell_id').fill_null(0)
+    rm_subtract_patch = rm_cell_to_remove.pivot(values="len", on="gene", index='cell_id').fill_null(0)
     # The update the find matching rows and columns 
-    counts_to_subtract.update(subtract_patch)
-    counts_to_add.update(add_patch)
-    rm_counts_to_subtract.update(rm_subtract_patch)
+    counts_to_subtract = counts_to_subtract.update(subtract_patch, on="cell_id", how='left').to_pandas().set_index("cell_id", drop=True)
+    counts_to_add = counts_to_add.update(add_patch, on="cell_id", how='left').to_pandas().set_index("cell_id", drop=True)
+    rm_counts_to_subtract = rm_counts_to_subtract.update(rm_subtract_patch, on="cell_id", how='left').to_pandas().set_index("cell_id", drop=True)
     
     return counts_to_subtract, counts_to_add, rm_counts_to_subtract
 
@@ -461,7 +469,10 @@ def make_reassignment_adata(adata: sc.AnnData,
         The adjusted adata
     """
     with process_time_ram("Updating gene counts") as ctm: 
-        counts_to_subtract, counts_to_add, rm_counts_to_subtract = generate_count_patches(adata=adata,
+        zero_counts = adata.to_df().copy()
+        zero_counts.loc[:,:] = 0
+        zero_counts = pl.from_pandas(zero_counts, include_index=True)
+        counts_to_subtract, counts_to_add, rm_counts_to_subtract = generate_count_patches(adata=zero_counts,
                                                                                         tx_to_reassign=tx_to_reassign,
                                                                                         tx_to_remove=tx_to_remove)
         layer_num = extract_layer_num(layer)

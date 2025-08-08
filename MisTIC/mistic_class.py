@@ -580,7 +580,9 @@ class mistic(nn.Module):
             An array of remove threshold to try 
         """
         criterion_df = []
-        
+        zero_counts = self.adata.to_df().copy()
+        zero_counts.loc[:,:] = 0
+        zero_counts = pl.from_pandas(zero_counts, include_index=True)
         for reassign_threshold in tqdm(reassign_threshold_grid, desc="Reassign grid"):
             for remove_threshold in tqdm(remove_threshold_grid, desc="Remove grid"):
                 # Correct tx 
@@ -588,7 +590,7 @@ class mistic(nn.Module):
                                                             reassign_threshold=reassign_threshold,
                                                             remove_threshold=remove_threshold)
                 # Generate patches 
-                counts_to_subtract, counts_to_add, rm_counts_to_subtract = generate_count_patches(adata=self.adata,
+                counts_to_subtract, counts_to_add, rm_counts_to_subtract = generate_count_patches(adata=zero_counts,
                                                                                                 tx_to_reassign=tx_to_reassign,
                                                                                                 tx_to_remove=tx_to_remove)
                 # Split into chunks 
