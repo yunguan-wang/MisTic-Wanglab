@@ -1,5 +1,5 @@
 __title__ = "txMisTIC"
-__description__ = "An algorithm to reassign transcripts"
+__description__ = "A probabilistic model for correcting mis-assigned transcripts due to cell segmentation error in imaging-based spatial transcriptomics."
 __version__ = "0.0.1"
-__author__ = "misticc developers"
-__authoremail__ = "@.edu; @.edu; @.edu"
+__author__ = "Yuqiu Yang, Erica DePasquale, David Adeleke, Xiangfei Xie, Yunguan Wang"
+__authoremail__ = "Yuqiu.Yang@utsouthwestern.edu, erica.depasquale@cchmc.org, david.adeleke@cchmc.org, xiangfei.xie@cchmc.org, yunguan.wang@cchmc.org"

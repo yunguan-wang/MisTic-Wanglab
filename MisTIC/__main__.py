@@ -28,7 +28,7 @@ import argparse
 from MisTIC.__version__ import __version__, __author__
 from MisTIC.mistic_class import mistic
 
-parser = argparse.ArgumentParser(description="Misc")
+parser = argparse.ArgumentParser(description="MisTIC")
 
 parser.add_argument("-v", "--version", action="version",
                     version=__version__, help="Display the version of the software")
@@ -57,9 +57,9 @@ parser.add_argument("--mask_dist_cutoff", type=float, default=5,
 parser.add_argument("--nearest", type=int, default=3,
                     help="Maximum number of nearest neighbors to perform reassignment")
 parser.add_argument("--prior_50_reassign_prob", type=float, default=0.01,
-                    help="The prior probability of reassigning a transcript that's ranked 50%")
+                    help="The prior probability of reassigning a transcript that's ranked 50%%")
 parser.add_argument("--prior_5_reassign_prob", type=float, default=0.99,
-                    help="The prior probability of reassigning a transcript that's ranked 5%")
+                    help="The prior probability of reassigning a transcript that's ranked 5%%")
 parser.add_argument("--max_de_cells", type=int, default=100000,
                     help="Maximum number of cells for DEG analysis")
 
@@ -84,7 +84,7 @@ parser.add_argument("--n_epochs", type=int, default=20,
 # reassign tx 
 parser.add_argument("--reassign_threshold_grid", nargs='+', default=[0.1, 0.2, 0.3, 0.4, 0.5],
                     help="An array of reassign threshold to try.")
-parser.add_argument("--remove_threshold_grid", nargs='+', default=[0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1],
+parser.add_argument("--remove_threshold_grid", nargs='+', default=[0, 0.1, 0.2, 0.3],
                     help="An array of remove threshold in percentage of reassign threshold to try.")
 # Model saving 
 parser.add_argument("--dir_name", type=str, default=".",
@@ -155,7 +155,6 @@ def main(cmdargs: argparse.Namespace):
     
     m.training_loop(n_epochs=n_epochs)
     m.compute_reassign_probs()
-    
     
     reassign_threshold_grid = [float(c) for c in cmdargs.reassign_threshold_grid]
     remove_threshold_grid = [float(c) for c in cmdargs.remove_threshold_grid]
