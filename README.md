@@ -1,7 +1,7 @@
 ![Logo](/assets/logo.png)
 
 # MisTIC
-> A probabilistic model for correcting mis-assigned transcripts due to cell segmentation error in imaging-based spatial transcriptomics. It builds on top of [PyTorch] and [scanpy].
+> MisTIC: Missegmented Transcript Inference Correction for Improved Spatial Transcriptomics Analysis. It builds on top of [PyTorch] and [scanpy].
 
 ![forthebadge](/assets/spatial-transcriptomics.svg)
 ![forthebadge](/assets/scanpy-pytorch.svg)
@@ -83,28 +83,39 @@ With both package building strategies, the dependencies should be installed auto
 The input for MisTIC consists of four pieces of data: 
 
 1. `detected_transcripts`: A dataframe recording information on detected transcripts. It has to contain at least four columns: 
-    1. `global_x`: The x-coordinates of the transcripts in microns. Note that some data will contain another column that appears to also be some x-coordinates. It might be the local x-coordinates in the field of view (FOV). We need the global coordinates. 
-    2. `global_y`: The y-coordinates of the transcripts in microns. Note that some data will contain another column that appears to also be some y-coordinates. It might be the local y-coordinates in the field of view (FOV). We need the global coordinates. 
+    1. `global_x`: The x-coordinates of the transcripts in `microns`. Note that some data will contain another column that appears to also be some x-coordinates. It might be the local x-coordinates in the field of view (FOV). We need the `global coordinates`. 
+    2. `global_y`: The y-coordinates of the transcripts in `microns`. Note that some data will contain another column that appears to also be some y-coordinates. It might be the local y-coordinates in the field of view (FOV). We need the `global coordinates`. 
     3. `gene`: The gene types of the transcripts. 
     4. `cell_id`: The IDs of the assigned cells. 
     * Note that the column names in your dataset might not be exactly what we specified here, but you can inform `MisTIC` the names of your dataset that can be used as those four columns. 
     * An index column or a column for IDs for the transcripts are NOT necessary. MisTIC will internally generate one. 
+    * An example `detected_transcripts` dataframe would look like this: 
+    
+    <img src="assets/detected_tx_exp.png" width="75%">
 2. `cell_metadata`: A dataframe containing meta information on the segmented cells. It has to contain at least three columns: 
     1. `cell_id`: IDs of segmented cells. MisTIC assumes that the first column of the dataframe will be the cell IDs. Make sure that the cell IDs correspond to those recorded in the `detected_transcript` dataframe.
-    2. `center_x`: Computed x-coordinates of the centroids of the cells in microns. 
-    3. `center_y`: Computed y-coordinates of the centroids of the cells in microns. 
+    2. `center_x`: Computed x-coordinates of the centroids of the cells in `microns`. 
+    3. `center_y`: Computed y-coordinates of the centroids of the cells in `microns`. 
     4. (Optional) `cell_type`: Annotated cell types. If the users do not provide such information, MisTIC will use the `leiden` algorithm for unsupervised clustering. We highly recommend the users to perform cell typing themselves instead of relying solely on the clustering algorithm.
     * Note that the column names in your dataset might not be exactly what we specified here, but you can inform `MisTIC` the names of your dataset that can be used as those four columns. 
+    * An example `cell_metadata` dataframe would look like this:
+
+    <img src="assets/cell_meta_exp.png" width="75%">
 3. `cel_boundary_polygons`: A dataframe recording the polygons of the segmented cells. It has to contain at least two columns: 
     1. `cell_id`: IDs of segmented cells. MisTIC assumes that the index column of the dataframe will be the cell IDs. Make sure that the cell IDs correspond to those recorded in the `detected_transcript` dataframe. 
     2. `polygon`: Polygons defining boundaries of cells. 
     * Note that this dataframe is usually in `.parquet` format. And the `polygon` column should be the `geometry` object in `GeoPandas`. 
     * MisTIC assume that the `geometry` is the `polygon`. Therefore, the specific column name does not really matter as long as the data type is correct. 
+    * An example `cel_boundary_polygons` dataframe would look like this: 
+
+    <img src="assets/cell_boundary_exp.png" width="75%">
 4. (Optional) `cell_by_gene_counts`: An optional dataframe of the cell-by-gene count matrix. 
     * The column names should be genes 
     * The first column is assumed to contain IDs of cells 
     * If it's not provided, MisTIC will generate a cell-by-gene matrix based on the `detected_transcript` dataframe. 
+    * An example `cell_by_gene_counts` dataframe would look like this: 
 
+    <img src="assets/cell_by_gene_exp.png" width="75%">
 
 We have also included in this package a sample dataset containing only ~200 cells under `tests/test_data` for your reference. 
 * Note that due to the large number of detected transcripts, it's NOT recommended to store such information in a `.csv` format as it will take a long time to load the data. A `.parquet` format is recommended. We used `.csv` just so that you can inspect the structure of the data easily. 
@@ -166,6 +177,7 @@ This will not only import the data into the `mistic` object, but also perform da
 ```
 
 * Note that the algorithm will not necessarily train `20` epochs due to the implementation of an early stopping mechanism. So no need to panic. 
+* Although `20` works well based on our experiments, in general a larger number number of epochs such as `50` might be used for larger datasets. 
 
 4. Transcript misassignment correction
 
@@ -311,14 +323,109 @@ python -m MisTIC --cell_centroid_x_y_col center_x center_y
 
 * Note that the CLI mode of MisTIC DOES NOT allow the users to perform reclustering. 
 
+## A simple demonstration 
+
+To further help you get familiar with the overall workflow of `MisTIC`, we have included a small SRT dataset under `tests/test_data`
+
+1. Object instantiation 
+
+```python
+>>> import os 
+>>> from MisTIC.mistic_class import mistic 
+>>> os.chdir("./tests/test_data")
+
+>>> m = mistic(cell_centroid_x_col="center_x",
+               cell_centroid_y_col="center_y",
+               celltype_col='cell_type',
+               tx_x_col='global_x',
+               tx_y_col='global_y',
+               gene_col='gene',
+               cell_col='cell_id')
+```
+
+2. Import data 
+
+```python
+>>> m.import_data(cell_metadata="./cell_metadata.csv",
+                  cell_boundary_polygons="./cell_boundary_polygons.parquet",
+                  detected_transcripts="./detected_transcripts.csv",
+                  cell_by_gene_counts="./cell_by_gene_counts.csv")
+```
+
+At this point, you are encouraged to inspect that the data has been corrected imported. The curated data are stored in three variables: 
+
+* `m.adata`: an AnnData object with an added layer `counts_0`
+
+```python 
+>>> # To access the normalized cell-by-gene matrix
+>>> # Normalization involves 
+>>> # 1. sc.pp.normalize_total(adata, target_sum=1000)
+>>> # 2. sc.pp.log1p(adata)
+>>> # 3. sc.pp.scale(adata)
+>>> m.adata.to_df()
+>>> # To access the actual counts 
+>>> m.adata.to_df(layer="counts_0")
+>>> # Information contained in Cell metadata such as 
+>>> # cell centroid, cell type are be accessed 
+>>> m.adata.obs
+>>> # For plotting 
+>>> sc.pl.umap(m.adata, color="counts_0_leiden")
+>>> # If cell types are provided 
+>>> sc.pl.umap(m.adata, color="cell_type")
+```
+
+* `m.cell_coords`: a geopandas GeoDataFrame with cell boundaries as the geometry
+* `m.tx_metadata`: a geopandas GeoDataFrame with the points of transcripts as the geometry
+
+3. Model training and inference 
+
+```python 
+>>> # Generate minibatches for SGD
+>>> m.patchfy_data()
+>>> # Modle training 
+>>> m.initialize_parameters()
+>>> m.training_loop(n_epochs=20)
+>>> # Inference 
+>>> m.compute_reassign_probs()
+```
+
+4. Reassign transcripts 
+
+```python
+>>> # Reassign tx 
+>>> m.correct_tx(reassign_threshold_grid=0.5,
+                 remove_threshold_grid=0)
+```
+
+A new layer `counts_0_corrected` is created based on the reassignment
+
+```python 
+>>> # To access the corrected cell-by-gene
+>>> m.adata.to_df(layer="counts_0_corrected")
+```
+
+5. Model saving 
+
+```python
+>>> m.save_model(dir_name=".",
+                    model_name="mistic",
+                    save_correction_result=True)
+```
+
 
 ## Citation :page_with_curl:
 
-If you use MisTIC in your SRT data analysis workflow, citing [our paper](https://google.com) is appreciated:
+If you use MisTIC in your SRT data analysis workflow, citing [our paper](https://www.biorxiv.org/content/10.64898/2025.12.11.693759v1) is appreciated:
 
 ```
-@article{
-
+@article{Yang2025,
+  title = {MisTIC: Missegmented Transcript Inference Correction for Improved Spatial Transcriptomics Analysis},
+  url = {http://dx.doi.org/10.64898/2025.12.11.693759},
+  DOI = {10.64898/2025.12.11.693759},
+  publisher = {openRxiv},
+  author = {Yang,  Yuqiu and DePasquale,  Erica AK and Adeleke,  David and Xie,  Xiangfei and Lu,  Zeyu and Nelson,  Michael D. and Xiao,  Guanghua and Wang,  Xinlei and Wang,  Yunguan},
+  year = {2025},
+  month = dec 
 }
 ```
 
