@@ -120,7 +120,7 @@ def import_data(cell_metadata: Union[str, pd.DataFrame],
         for each cell. The first column is assumed to be the IDs for cells. It should contain one column 
         that records the coordinates of the vertices.
     detected_transcripts : Union[str, pd.DataFrame, gpd.GeoDataFrame]
-        Either the path to the csv file or a pandas dataframe or geopandas GeoDataFrame containing the information of the detected transcripts.
+        Either the path to the csv/parquet file or a pandas dataframe or geopandas GeoDataFrame containing the information of the detected transcripts.
         The first column is assumed to be some index. The information should contain the ID for a transcripte/molecule, 
         the ID of the cell it belongs to, its xy coordinate, and its gene information. 
     cell_by_gene_counts : Optional[Union[str, pd.DataFrame]], optional
